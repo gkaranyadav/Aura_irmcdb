@@ -1,8 +1,9 @@
 streamlit==1.28.0
 PyPDF2==3.1.0
 sentence-transformers==2.2.2
+faiss-cpu==1.7.4
 numpy==1.24.6
 pytesseract==0.3.12
 Pillow==10.1.0
 pdf2image==1.17.1
-gTTS==2.3.2
+gTTS==2.5.0
