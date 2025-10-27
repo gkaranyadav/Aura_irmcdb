@@ -1,4 +1,4 @@
-# app.py - IRMC AskPro ⚡ SIMPLE WORKING VERSION
+# app.py - IRMC AskPro ⚡ GENERAL PURPOSE FOR ANY DOCUMENT
 import streamlit as st
 import tempfile
 import os
@@ -11,6 +11,7 @@ import faiss
 import numpy as np
 from databricks.sdk import WorkspaceClient
 import time
+import re
 
 # =============================================================================
 # CONFIGURATION
@@ -24,7 +25,7 @@ class Config:
     CHUNK_SIZE = 500
 
 # =============================================================================
-# SIMPLE DOCUMENT PROCESSOR (NO OCR)
+# DOCUMENT PROCESSOR (SAME - IT'S GOOD)
 # =============================================================================
 class DocumentProcessor:
     def __init__(self):
@@ -40,16 +41,13 @@ class DocumentProcessor:
     
     def process_pdf(self, pdf_file):
         try:
-            # Show progress
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Save file temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 tmp_file.write(pdf_file.getvalue())
                 tmp_path = tmp_file.name
             
-            # Read PDF
             status_text.text("📖 Reading PDF...")
             reader = PdfReader(tmp_path)
             total_pages = len(reader.pages)
@@ -57,7 +55,6 @@ class DocumentProcessor:
             self.chunks = []
             self.chunk_metadata = []
             
-            # Extract text from each page
             for page_num, page in enumerate(reader.pages, 1):
                 status_text.text(f"📄 Processing page {page_num}/{total_pages}...")
                 progress_bar.progress(page_num / total_pages)
@@ -65,21 +62,34 @@ class DocumentProcessor:
                 text = page.extract_text() or ""
                 
                 if text.strip():
-                    # Simple text cleaning
-                    clean_text = ' '.join(text.split())
+                    clean_text = re.sub(r'\s+', ' ', text).strip()
                     
-                    # Split into chunks
-                    words = clean_text.split()
-                    for i in range(0, len(words), Config.CHUNK_SIZE):
-                        chunk = ' '.join(words[i:i + Config.CHUNK_SIZE])
-                        if len(chunk) > 50:  # Only keep substantial chunks
-                            self.chunks.append(chunk)
-                            self.chunk_metadata.append({
-                                "page": page_num,
-                                "chunk_id": f"page_{page_num}_chunk_{len(self.chunks)}"
-                            })
+                    sentences = re.split(r'[.!?]+', clean_text)
+                    current_chunk = ""
+                    
+                    for sentence in sentences:
+                        sentence = sentence.strip()
+                        if not sentence:
+                            continue
+                            
+                        if len(current_chunk + sentence) < Config.CHUNK_SIZE:
+                            current_chunk += sentence + ". "
+                        else:
+                            if current_chunk:
+                                self.chunks.append(current_chunk.strip())
+                                self.chunk_metadata.append({
+                                    "page": page_num,
+                                    "chunk_id": f"page_{page_num}_chunk_{len(self.chunks)}"
+                                })
+                            current_chunk = sentence + ". "
+                    
+                    if current_chunk:
+                        self.chunks.append(current_chunk.strip())
+                        self.chunk_metadata.append({
+                            "page": page_num,
+                            "chunk_id": f"page_{page_num}_chunk_{len(self.chunks)}"
+                        })
             
-            # Create embeddings
             if self.chunks:
                 status_text.text("🧠 Creating search index...")
                 embeddings = self.embedder.encode(self.chunks)
@@ -90,33 +100,15 @@ class DocumentProcessor:
                 progress_bar.progress(100)
                 
                 st.success(f"✅ Success! Processed {len(self.chunks)} text chunks from {total_pages} pages")
-                
-                # Show sample of extracted text
-                with st.expander("🔍 View extracted text sample"):
-                    for i in range(min(3, len(self.chunks))):
-                        st.write(f"**Chunk {i+1} (Page {self.chunk_metadata[i]['page']}):**")
-                        st.text(self.chunks[i][:200] + "..." if len(self.chunks[i]) > 200 else self.chunks[i])
-                
                 return len(self.chunks)
             else:
-                st.error("""
-                ❌ No text found in PDF!
-                
-                **Possible reasons:**
-                - PDF is scanned (image-based)
-                - PDF is password protected  
-                - PDF is corrupted
-                - Text is in unsupported format
-                
-                **Try uploading a PDF with selectable text.**
-                """)
+                st.error("❌ No text found in PDF!")
                 return 0
                 
         except Exception as e:
             st.error(f"❌ Processing failed: {str(e)}")
             return 0
         finally:
-            # Cleanup
             try:
                 os.unlink(tmp_path)
             except:
@@ -135,13 +127,13 @@ class DocumentProcessor:
                 for i, idx in enumerate(indices[0]):
                     if idx < len(self.chunks):
                         similarity = 1 / (1 + distances[0][i])
-                        results.append({
-                            "content": self.chunks[idx],
-                            "metadata": self.chunk_metadata[idx],
-                            "similarity": round(similarity, 3)
-                        })
+                        if similarity > 0.1:
+                            results.append({
+                                "content": self.chunks[idx],
+                                "metadata": self.chunk_metadata[idx],
+                                "similarity": round(similarity, 3)
+                            })
                 
-                # Sort by similarity
                 results.sort(key=lambda x: x['similarity'], reverse=True)
                 return results
         except Exception as e:
@@ -149,7 +141,7 @@ class DocumentProcessor:
             return []
 
 # =============================================================================
-# SIMPLE LLM SERVICE
+# SIMPLE & SMART LLM SERVICE - WORKS WITH ANY DOCUMENT
 # =============================================================================
 class LLMService:
     def generate_answer(self, question, context_chunks):
@@ -157,11 +149,10 @@ class LLMService:
             if not context_chunks:
                 return self._no_results_template(question), 0.0
             
-            # Calculate confidence
             avg_confidence = sum(chunk['similarity'] for chunk in context_chunks) / len(context_chunks)
             
-            # Generate answer
-            answer = self._create_answer(question, context_chunks, avg_confidence)
+            # SIMPLE LOGIC: Just extract the most relevant information
+            answer = self._extract_relevant_info(question, context_chunks, avg_confidence)
             
             return answer, avg_confidence
             
@@ -172,56 +163,58 @@ class LLMService:
         return f"""
 **❌ No relevant information found for:** "{question}"
 
-**💡 Try these solutions:**
-1. **Use different keywords** from the document
-2. **Ask about general topics** like "summary" or "main points"  
-3. **Rephrase your question** to be more specific
-4. **Check if PDF has selectable text** (not scanned images)
-
-**Example questions that usually work:**
-- "What is this document about?"
-- "Summarize the main topics"
-- "What are the key points?"
+**💡 Suggestions:**
+- Try different keywords from the document
+- Ask more general questions
+- Check if the PDF contains relevant information
 """
     
-    def _create_answer(self, question, context_chunks, confidence):
-        # Extract key information
-        key_points = []
-        for chunk in context_chunks[:3]:  # Use top 3 chunks
-            sentences = chunk['content'].split('. ')
-            if sentences:
-                key_points.append(sentences[0] + ".")  # First sentence
+    def _extract_relevant_info(self, question, context_chunks, confidence):
+        """Extract and present the most relevant information from chunks"""
+        
+        # Combine and clean the content
+        all_content = " ".join([chunk['content'] for chunk in context_chunks])
+        
+        # Remove duplicate sentences
+        sentences = list(set([s.strip() for s in all_content.split('. ') if len(s.strip()) > 10]))
+        
+        # Sort sentences by relevance (simple heuristic - longer sentences often have more info)
+        sentences.sort(key=len, reverse=True)
         
         answer = f"""
-**🤔 Question:** {question}
+**🤔 Your Question:** {question}
 
-**📊 Found {len(context_chunks)} relevant sections** (Confidence: {confidence:.1%})
+**📊 Search Results:** Found {len(context_chunks)} relevant sections with {confidence:.1%} confidence
 
-**💡 Answer:**
-
-Based on the document, here's what I found:
+**💡 Relevant Information from Document:**
 
 """
         
-        # Add key points
-        for i, point in enumerate(key_points, 1):
-            answer += f"{i}. {point}\n"
+        # Add the most informative sentences
+        for i, sentence in enumerate(sentences[:5], 1):  # Show top 5 unique sentences
+            if len(sentence) > 15:  # Only substantial sentences
+                answer += f"• {sentence}.\n"
         
-        # Add source references
-        answer += f"""
-**🔍 Sources referenced:**
-"""
-        for i, chunk in enumerate(context_chunks, 1):
-            answer += f"- Page {chunk['metadata']['page']} (Confidence: {chunk['similarity']:.1%})\n"
+        # Add source information
+        unique_pages = set(str(chunk['metadata']['page']) for chunk in context_chunks)
+        answer += f"\n**🔍 Source Pages:** {', '.join(unique_pages)}"
+        
+        # Add confidence indicator
+        if confidence > 0.7:
+            answer += f"\n\n✅ **High Confidence** - This information is very relevant to your question"
+        elif confidence > 0.4:
+            answer += f"\n\n⚠️ **Medium Confidence** - This information is somewhat relevant"
+        else:
+            answer += f"\n\n🔍 **Low Confidence** - Consider rephrasing your question"
         
         return answer
 
 # =============================================================================
-# SIMPLE VOICE SERVICE
+# VOICE SERVICE
 # =============================================================================
 class VoiceService:
     def text_to_speech_html(self, text):
-        clean_text = text.replace('"', '\\"').replace("'", "\\'")[:500]  # Limit length
+        clean_text = text.replace('"', '\\"').replace("'", "\\'")[:500]
         html = f"""
         <script>
         function speak() {{
@@ -277,14 +270,16 @@ def main():
             st.success(f"✅ **Ready:** {st.session_state.pdf_name}")
         
         st.markdown("---")
-        st.markdown("**💡 Tips:**")
-        st.markdown("- Upload PDFs with **selectable text**")
-        st.markdown("- Ask **specific questions**")
-        st.markdown("- Try **'What is this about?'** first")
+        st.markdown("**💡 Works with:**")
+        st.markdown("- Resumes/CVs")
+        st.markdown("- Research papers")
+        st.markdown("- Reports & documents")
+        st.markdown("- Manuals & guides")
+        st.markdown("- Any text-based PDF")
     
     # Main area
     st.title("IRMC AskPro ⚡")
-    st.markdown("Ask questions about your PDF documents")
+    st.markdown("Ask questions about **ANY** PDF document")
     
     # Initialize chat
     if 'messages' not in st.session_state:
@@ -296,11 +291,17 @@ def main():
     if not st.session_state.pdf_processed:
         st.info("📄 **Please upload and process a PDF document in the sidebar**")
         st.markdown("""
-        **How to get started:**
-        1. 📤 Upload a PDF file (left sidebar)
+        **How it works:**
+        1. 📤 Upload any PDF file
         2. 🔄 Click 'Process Document' 
-        3. 💬 Ask questions below
+        3. 💬 Ask questions in natural language
         4. 🎯 Get instant answers with sources
+        
+        **Example questions:**
+        - "What is this document about?"
+        - "Tell me about [specific topic]"
+        - "Find information about [keyword]"
+        - "Summarize the main points"
         """)
     
     # Display chat history
@@ -309,7 +310,7 @@ def main():
             st.markdown(message["content"])
     
     # Chat input
-    question = st.chat_input("Ask a question about your document...")
+    question = st.chat_input("Ask any question about your document...")
     
     # Process question
     if question and st.session_state.pdf_processed:
@@ -335,16 +336,15 @@ def main():
             # Display answer
             st.markdown(answer)
             
-            # Show confidence
-            if confidence > 0:
-                if confidence > 0.7:
-                    st.success(f"✅ High confidence: {confidence:.1%}")
-                elif confidence > 0.4:
-                    st.warning(f"⚠️ Medium confidence: {confidence:.1%}")
-                else:
-                    st.error(f"🔍 Low confidence: {confidence:.1%}")
+            # Show detailed sources if available
+            if context_chunks:
+                with st.expander("📋 View Source Details"):
+                    for i, chunk in enumerate(context_chunks):
+                        st.write(f"**Source {i+1}** (Page {chunk['metadata']['page']}, Confidence: {chunk['similarity']:.1%})")
+                        st.text(chunk['content'][:300] + "..." if len(chunk['content']) > 300 else chunk['content'])
+                        st.markdown("---")
             
-            # Show response time
+            # Response time
             st.caption(f"⏱️ Response time: {response_time:.2f}s")
             
             # Voice button
