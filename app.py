@@ -1,4 +1,4 @@
-# app.py - IRMC AskPro ⚡ WITH UPDATED GROQ MODELS
+# app.py - IRMC AskPro ⚡ WITH CURRENT GROQ MODELS
 import streamlit as st
 import tempfile
 import os
@@ -28,7 +28,7 @@ class Config:
     GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # =============================================================================
-# GROQ LLM SERVICE - UPDATED MODELS
+# GROQ LLM SERVICE - CURRENT MODELS ONLY
 # =============================================================================
 class GroqLLMService:
     def __init__(self):
@@ -38,17 +38,21 @@ class GroqLLMService:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        # Available Groq models (updated)
+        # CURRENT GROQ MODELS (From their deprecation page)
         self.available_models = [
-            "llama-3.1-70b-versatile",  # Best for general purpose
-            "llama-3.1-8b-instant",     # Fastest
-            "mixtral-8x7b-32768",       # For complex reasoning
-            "gemma2-9b-it"              # Good alternative
+            "llama-3.3-70b-versatile",      # Main production model
+            "llama-3.1-8b-instant",         # Fastest model
+            "meta-llama/llama-4-scout-17b-16e-instruct",  # Latest vision/model
+            "openai/gpt-oss-120b",          # Large model alternative
+            "qwen/qwen3-32b",               # Good for complex reasoning
+            "moonshotai/kimi-k2-instruct-0905",  # Large context
+            "whisper-large-v3-turbo",       # For audio (if needed)
+            "meta-llama/llama-guard-4-12b"  # For safety
         ]
-        self.current_model = self.available_models[0]  # Use 70B by default
+        self.current_model = "llama-3.3-70b-versatile"  # Best overall model
     
     def call_groq(self, prompt, max_tokens=1024):
-        """Call Groq API with current available models"""
+        """Call Groq API with current production models"""
         try:
             payload = {
                 "messages": [
@@ -70,19 +74,27 @@ class GroqLLMService:
                 result = response.json()
                 return result["choices"][0]["message"]["content"]
             else:
-                # Try fallback models if main model fails
-                return self._try_fallback_models(prompt, max_tokens, response)
+                error_msg = response.text
+                # If model not found, try the main alternatives
+                if "model_decommissioned" in error_msg or "not found" in error_msg:
+                    return self._try_production_models(prompt, max_tokens)
+                else:
+                    return f"❌ Groq API Error: {response.status_code} - {error_msg}"
                 
         except Exception as e:
             return f"❌ Groq Connection Error: {str(e)}"
     
-    def _try_fallback_models(self, prompt, max_tokens, original_response):
-        """Try other available models if primary fails"""
-        fallback_models = self.available_models[1:]  # Skip the first one we already tried
+    def _try_production_models(self, prompt, max_tokens):
+        """Try production models that should definitely work"""
+        production_models = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant", 
+            "qwen/qwen3-32b"
+        ]
         
-        for model in fallback_models:
+        for model in production_models:
             try:
-                st.warning(f"🔄 Trying fallback model: {model}")
+                st.info(f"🔄 Trying production model: {model}")
                 payload = {
                     "messages": [{"role": "user", "content": prompt}],
                     "model": model,
@@ -99,12 +111,13 @@ class GroqLLMService:
                     st.success(f"✅ Success with model: {model}")
                     self.current_model = model  # Switch to working model
                     return result["choices"][0]["message"]["content"]
+                else:
+                    continue
                     
             except Exception as e:
                 continue
         
-        # If all models fail
-        return f"❌ All Groq models failed. Original error: {original_response.status_code} - {original_response.text}"
+        return "❌ All Groq production models failed. Please check your API key or try again later."
     
     def generate_answer(self, question, context_chunks):
         """Generate intelligent answer using Groq LLM"""
@@ -379,7 +392,7 @@ def main():
         
         st.markdown("---")
         st.markdown("**🚀 Powered by:**")
-        st.markdown("- 🦙 Groq Llama 3.1 70B")
+        st.markdown("- 🦙 Groq Llama 3.3 70B")
         st.markdown("- ⚡ World's Fastest LLM")
         st.markdown("- 🧠 Intelligent Analysis")
         st.markdown("- 📊 Precise Answers")
@@ -402,7 +415,7 @@ def main():
         1. 📤 Upload any PDF document
         2. 🔄 AI processes with intelligent chunking  
         3. 💬 Ask complex, specific questions
-        4. 🦙 Groq Llama 3.1 70B analyzes and answers
+        4. 🦙 Groq Llama 3.3 70B analyzes and answers
         
         **Ask about:**
         - Specific numbers and statistics
