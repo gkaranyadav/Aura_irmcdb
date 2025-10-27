@@ -1,4 +1,4 @@
-# app.py - IRMC AskPro ⚡ WITH GROQ LLM POWER
+# app.py - IRMC AskPro ⚡ WITH UPDATED GROQ MODELS
 import streamlit as st
 import tempfile
 import os
@@ -28,7 +28,7 @@ class Config:
     GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # =============================================================================
-# GROQ LLM SERVICE - FAST & RELIABLE
+# GROQ LLM SERVICE - UPDATED MODELS
 # =============================================================================
 class GroqLLMService:
     def __init__(self):
@@ -38,9 +38,17 @@ class GroqLLMService:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        # Available Groq models (updated)
+        self.available_models = [
+            "llama-3.1-70b-versatile",  # Best for general purpose
+            "llama-3.1-8b-instant",     # Fastest
+            "mixtral-8x7b-32768",       # For complex reasoning
+            "gemma2-9b-it"              # Good alternative
+        ]
+        self.current_model = self.available_models[0]  # Use 70B by default
     
     def call_groq(self, prompt, max_tokens=1024):
-        """Call Groq API with Llama 3 70B - WORLD'S FASTEST LLM"""
+        """Call Groq API with current available models"""
         try:
             payload = {
                 "messages": [
@@ -49,7 +57,7 @@ class GroqLLMService:
                         "content": prompt
                     }
                 ],
-                "model": "llama3-70b-8192",  # Using 70B model for best quality
+                "model": self.current_model,
                 "temperature": 0.1,  # Low temperature for factual answers
                 "max_tokens": max_tokens,
                 "top_p": 0.9,
@@ -62,10 +70,41 @@ class GroqLLMService:
                 result = response.json()
                 return result["choices"][0]["message"]["content"]
             else:
-                return f"❌ Groq API Error: {response.status_code} - {response.text}"
+                # Try fallback models if main model fails
+                return self._try_fallback_models(prompt, max_tokens, response)
                 
         except Exception as e:
             return f"❌ Groq Connection Error: {str(e)}"
+    
+    def _try_fallback_models(self, prompt, max_tokens, original_response):
+        """Try other available models if primary fails"""
+        fallback_models = self.available_models[1:]  # Skip the first one we already tried
+        
+        for model in fallback_models:
+            try:
+                st.warning(f"🔄 Trying fallback model: {model}")
+                payload = {
+                    "messages": [{"role": "user", "content": prompt}],
+                    "model": model,
+                    "temperature": 0.1,
+                    "max_tokens": max_tokens,
+                    "top_p": 0.9,
+                    "stream": False
+                }
+                
+                response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    st.success(f"✅ Success with model: {model}")
+                    self.current_model = model  # Switch to working model
+                    return result["choices"][0]["message"]["content"]
+                    
+            except Exception as e:
+                continue
+        
+        # If all models fail
+        return f"❌ All Groq models failed. Original error: {original_response.status_code} - {original_response.text}"
     
     def generate_answer(self, question, context_chunks):
         """Generate intelligent answer using Groq LLM"""
@@ -129,7 +168,7 @@ ANSWER:"""
 
 **📊 Analysis Results:** Found {len(context_chunks)} relevant sections with {confidence:.1%} confidence
 
-**💡 Intelligent Answer (Powered by Groq Llama 3 70B):**
+**💡 Intelligent Answer (Powered by Groq {self.current_model}):**
 
 {llm_response}
 
@@ -340,7 +379,7 @@ def main():
         
         st.markdown("---")
         st.markdown("**🚀 Powered by:**")
-        st.markdown("- 🦙 Groq Llama 3 70B")
+        st.markdown("- 🦙 Groq Llama 3.1 70B")
         st.markdown("- ⚡ World's Fastest LLM")
         st.markdown("- 🧠 Intelligent Analysis")
         st.markdown("- 📊 Precise Answers")
@@ -363,7 +402,7 @@ def main():
         1. 📤 Upload any PDF document
         2. 🔄 AI processes with intelligent chunking  
         3. 💬 Ask complex, specific questions
-        4. 🦙 Groq Llama 3 70B analyzes and answers
+        4. 🦙 Groq Llama 3.1 70B analyzes and answers
         
         **Ask about:**
         - Specific numbers and statistics
