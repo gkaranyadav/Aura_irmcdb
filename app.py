@@ -236,7 +236,7 @@ class AuraPDFQAApp:
         if uploaded_file:
             st.sidebar.write(f"**File:** {uploaded_file.name}")
             if st.sidebar.button("🚀 Process Document"):
-                with st.spinner("Processing PDF..."):
+                with st.spinner("Knowledge at your command"):
                     count = st.session_state.doc_processor.process_pdf(uploaded_file)
                     if count > 0:
                         st.session_state.pdf_processed = True
