@@ -1,6 +1,8 @@
 # app.py - Aura PDF QA ⚡
 import streamlit as st
-import tempfile, os, time
+import tempfile
+import os
+import time
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -9,16 +11,12 @@ import pytesseract
 from PIL import Image
 import pdf2image
 from gtts import gTTS
-from groq import Groq
-import speech_recognition as sr
-import io
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 class Config:
     EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
-    GROQ_MODEL = "llama-3.3-70b-versatile"
     TOP_K_CHUNKS = 3
     CHUNK_SIZE = 500
     MIN_PARAGRAPH_LENGTH = 20
@@ -33,301 +31,444 @@ class DocumentProcessor:
             self.index = None
             self.chunks = []
             self.chunk_metadata = []
+            st.success("✅ Document processor ready")
         except Exception as e:
             st.error(f"❌ Document processor failed: {e}")
 
     def extract_text_direct(self, pdf_path):
-        reader = PdfReader(pdf_path)
-        extracted = []
-        for i, page in enumerate(reader.pages, 1):
-            text = page.extract_text() or ""
-            if text.strip():
-                extracted.append({"page": i, "text": text.strip()})
-        return extracted
+        """Extract text directly from PDF"""
+        try:
+            reader = PdfReader(pdf_path)
+            extracted = []
+            for i, page in enumerate(reader.pages, 1):
+                text = page.extract_text() or ""
+                if text.strip():
+                    extracted.append({"page": i, "text": text.strip()})
+            return extracted
+        except Exception as e:
+            st.error(f"Error in direct text extraction: {e}")
+            return []
 
     def extract_text_ocr(self, pdf_path):
-        images = pdf2image.convert_from_path(pdf_path, dpi=200)
-        extracted = []
-        for i, image in enumerate(images):
-            text = pytesseract.image_to_string(image)
-            if text.strip():
-                extracted.append({"page": i + 1, "text": text.strip()})
-        return extracted
+        """Extract text using OCR for scanned PDFs"""
+        try:
+            images = pdf2image.convert_from_path(pdf_path, dpi=200)
+            extracted = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for i, image in enumerate(images):
+                status_text.text(f"📷 OCR page {i+1}/{len(images)}")
+                text = pytesseract.image_to_string(image)
+                if text.strip():
+                    extracted.append({"page": i + 1, "text": text.strip()})
+                progress_bar.progress((i + 1) / len(images))
+            
+            status_text.text("✅ OCR complete")
+            return extracted
+        except Exception as e:
+            st.error(f"Error in OCR extraction: {e}")
+            return []
 
     def analyze_pdf_type(self, pdf_path):
-        reader = PdfReader(pdf_path)
-        text_pages = sum(1 for page in reader.pages if len((page.extract_text() or "").strip()) > 50)
-        total_pages = len(reader.pages)
-        return "text_based" if total_pages == 0 or text_pages / total_pages > 0.5 else "scanned"
+        """Analyze if PDF is text-based or scanned"""
+        try:
+            reader = PdfReader(pdf_path)
+            if len(reader.pages) == 0:
+                return "scanned"
+            
+            text_pages = 0
+            for page in reader.pages:
+                text = page.extract_text() or ""
+                if len(text.strip()) > 50:
+                    text_pages += 1
+            
+            total_pages = len(reader.pages)
+            return "text_based" if text_pages / total_pages > 0.5 else "scanned"
+        except Exception as e:
+            st.error(f"Error analyzing PDF type: {e}")
+            return "scanned"  # Default to OCR for safety
+
+    def chunk_text(self, extracted_text, method):
+        """Split text into manageable chunks"""
+        chunks = []
+        metadata = []
+        
+        for item in extracted_text:
+            page = item["page"]
+            text = item["text"]
+            
+            # Split into paragraphs first
+            paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) >= Config.MIN_PARAGRAPH_LENGTH]
+            
+            for para in paragraphs:
+                if len(para) <= Config.CHUNK_SIZE:
+                    # Paragraph is small enough
+                    chunks.append(para)
+                    metadata.append({"page": page, "method": method})
+                else:
+                    # Split large paragraphs into sentences
+                    sentences = [s.strip() + "." for s in para.split(". ") if s.strip()]
+                    current_chunk = ""
+                    
+                    for sentence in sentences:
+                        if len(current_chunk) + len(sentence) <= Config.CHUNK_SIZE:
+                            current_chunk += " " + sentence
+                        else:
+                            if current_chunk.strip():
+                                chunks.append(current_chunk.strip())
+                                metadata.append({"page": page, "method": method})
+                            current_chunk = sentence
+                    
+                    # Add the last chunk
+                    if current_chunk.strip():
+                        chunks.append(current_chunk.strip())
+                        metadata.append({"page": page, "method": method})
+        
+        return chunks, metadata
 
     def process_pdf(self, uploaded_file):
+        """Main PDF processing pipeline"""
+        # Clear previous data
         self.chunks = []
         self.chunk_metadata = []
         self.index = None
         
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        tmp_file.write(uploaded_file.getvalue())
-        tmp_file.close()
-        pdf_path = tmp_file.name
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            pdf_path = tmp_file.name
 
         try:
-            with st.spinner("📄 Processing PDF..."):
-                pdf_type = self.analyze_pdf_type(pdf_path)
+            st.info("🔍 Analyzing PDF type...")
+            pdf_type = self.analyze_pdf_type(pdf_path)
+            st.info(f"📄 PDF type detected: {pdf_type}")
 
-                if pdf_type == "text_based":
-                    extracted = self.extract_text_direct(pdf_path)
-                else:
-                    extracted = self.extract_text_ocr(pdf_path)
+            # Extract text based on PDF type
+            if pdf_type == "text_based":
+                extracted = self.extract_text_direct(pdf_path)
+                method = "text"
+            else:
+                extracted = self.extract_text_ocr(pdf_path)
+                method = "ocr"
 
-                for item in extracted:
-                    page = item["page"]
-                    paragraphs = [p.strip() for p in item["text"].split("\n\n") if len(p.strip()) >= Config.MIN_PARAGRAPH_LENGTH]
-                    for para in paragraphs:
-                        if len(para) > Config.CHUNK_SIZE:
-                            sentences = para.split(". ")
-                            chunk = ""
-                            for s in sentences:
-                                if len(chunk + s) < Config.CHUNK_SIZE:
-                                    chunk += s + ". "
-                                else:
-                                    if chunk.strip():
-                                        self.chunks.append(chunk.strip())
-                                        self.chunk_metadata.append({"page": page})
-                                    chunk = s + ". "
-                            if chunk.strip():
-                                self.chunks.append(chunk.strip())
-                                self.chunk_metadata.append({"page": page})
-                        else:
-                            if para.strip():
-                                self.chunks.append(para)
-                                self.chunk_metadata.append({"page": page})
+            if not extracted:
+                st.error("❌ No text could be extracted from the PDF")
+                return 0
 
-                if not self.chunks:
-                    st.error("❌ No text extracted from PDF.")
-                    return 0
+            st.info(f"✅ Extracted text from {len(extracted)} pages using {method.upper()}")
 
-                embeddings = self.embedder.encode(self.chunks)
-                self.index = faiss.IndexFlatL2(embeddings.shape[1])
-                self.index.add(np.array(embeddings))
-                return len(self.chunks)
+            # Chunk the text
+            self.chunks, self.chunk_metadata = self.chunk_text(extracted, method)
+            st.info(f"📊 Created {len(self.chunks)} text chunks")
+
+            if not self.chunks:
+                st.error("❌ No valid text chunks created from PDF")
+                return 0
+
+            # Create embeddings and FAISS index
+            st.info("🧠 Creating embeddings...")
+            embeddings = self.embedder.encode(self.chunks)
+            self.index = faiss.IndexFlatL2(embeddings.shape[1])
+            self.index.add(np.array(embeddings))
+            
+            st.success(f"✅ PDF processed successfully: {len(self.chunks)} chunks indexed")
+            return len(self.chunks)
 
         except Exception as e:
-            st.error(f"❌ Processing failed: {str(e)}")
+            st.error(f"❌ PDF processing failed: {str(e)}")
             return 0
         finally:
+            # Clean up temporary file
             if os.path.exists(pdf_path):
                 os.unlink(pdf_path)
 
     def search_similar(self, query, top_k=3):
+        """Search for similar text chunks"""
         if not self.chunks or self.index is None:
             return []
 
-        query_vec = self.embedder.encode([query])
-        distances, indices = self.index.search(np.array(query_vec), top_k)
-        results = []
-        for i, idx in enumerate(indices[0]):
-            if idx < len(self.chunks):
-                sim = 1 / (1 + distances[0][i])
-                results.append({"content": self.chunks[idx], "metadata": self.chunk_metadata[idx], "similarity": round(sim, 3)})
-        results.sort(key=lambda x: x["similarity"], reverse=True)
-        return results
-
-# =============================================================================
-# LLM SERVICE - Simplified
-# =============================================================================
-class LLMService:
-    def __init__(self):
         try:
-            self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-        except:
-            self.client = None
-
-    def generate_answer(self, question, chunks):
-        if not chunks:
-            return "I couldn't find relevant information in the document to answer your question.", []
-
-        if self.client:
-            return self._generate_llm_answer(question, chunks)
-        else:
-            return self._simple_answer(chunks)
-
-    def _generate_llm_answer(self, question, chunks):
-        try:
-            context = "\n\n".join([f"Page {c['metadata']['page']}: {c['content']}" for c in chunks])
+            query_vec = self.embedder.encode([query])
+            distances, indices = self.index.search(np.array(query_vec), min(top_k, len(self.chunks)))
             
-            messages = [
-                {
-                    "role": "system",
-                    "content": "Provide a direct, concise answer based on the document. Include page numbers for key facts. Keep it simple and clear."
-                },
-                {
-                    "role": "user", 
-                    "content": f"Question: {question}\n\nDocument Context:\n{context}\n\nAnswer:"
-                }
-            ]
+            results = []
+            for i, idx in enumerate(indices[0]):
+                if idx < len(self.chunks):
+                    # Convert distance to similarity score (0-1)
+                    similarity = 1 / (1 + distances[0][i])
+                    results.append({
+                        "content": self.chunks[idx],
+                        "metadata": self.chunk_metadata[idx],
+                        "similarity": round(similarity, 3)
+                    })
             
-            response = self.client.chat.completions.create(
-                model=Config.GROQ_MODEL,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=500
-            )
-            
-            answer = response.choices[0].message.content
-            pages = list(set([c['metadata']['page'] for c in chunks]))
-            return answer, pages
+            # Sort by similarity (highest first)
+            results.sort(key=lambda x: x["similarity"], reverse=True)
+            return results[:top_k]
             
         except Exception as e:
-            return self._simple_answer(chunks)
+            st.error(f"Search error: {e}")
+            return []
 
-    def _simple_answer(self, chunks):
-        key_sentences = []
-        for chunk in chunks:
-            sentences = [s.strip() for s in chunk['content'].split('.') if s.strip()]
-            key_sentences.extend(sentences[:2])
+# =============================================================================
+# LLM SERVICE
+# =============================================================================
+class LLMService:
+    def generate_answer(self, question, chunks):
+        """Generate answer from relevant chunks"""
+        if not chunks:
+            return "❌ No relevant information found for your question. Please try rephrasing or ask about a different topic.", 0.0
         
-        unique_sentences = []
-        for sentence in key_sentences:
-            if sentence not in unique_sentences and len(sentence) > 20:
-                unique_sentences.append(sentence)
-        
-        summary = " ".join(unique_sentences[:4])
-        pages = list(set([c['metadata']['page'] for c in chunks]))
-        return summary, pages
+        try:
+            # Calculate average confidence
+            avg_conf = sum(c["similarity"] for c in chunks) / len(chunks)
+            
+            # Generate summary from chunks
+            summary = self._summarize_chunks(chunks)
+            
+            # Format answer
+            answer = f"**Question:** {question}\n\n**Answer:**\n{summary}\n\n**Sources:**\n"
+            
+            for i, chunk in enumerate(chunks, 1):
+                preview = chunk['content'][:150] + "..." if len(chunk['content']) > 150 else chunk['content']
+                answer += f"{i}. Page {chunk['metadata']['page']} | Confidence: {chunk['similarity']:.1%}\n   {preview}\n\n"
+            
+            return answer, avg_conf
+            
+        except Exception as e:
+            return f"❌ Error generating answer: {str(e)}", 0.0
+
+    def _summarize_chunks(self, chunks):
+        """Simple summarization of relevant chunks"""
+        try:
+            all_text = " ".join([c['content'] for c in chunks])
+            sentences = [s.strip() for s in all_text.split(". ") if len(s.strip()) > 20]
+            
+            # Take most relevant sentences (simplified approach)
+            key_sentences = sentences[:4]
+            summary = " ".join([f"{s}." for s in key_sentences])
+            
+            return summary if summary else "Based on the document, the relevant information is contained in the sources above."
+            
+        except Exception as e:
+            return "Relevant information found in the sources above."
 
 # =============================================================================
 # VOICE SERVICE
 # =============================================================================
 class VoiceService:
-    def text_to_speech(self, text):
+    def speak_text(self, text):
+        """Convert text to speech"""
         try:
-            tts = gTTS(text)
-            audio_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-            tts.save(audio_file.name)
-            return audio_file.name
+            # Extract only the answer part for TTS (remove sources)
+            if "**Answer:**" in text:
+                answer_part = text.split("**Answer:**")[1].split("**Sources:**")[0].strip()
+            else:
+                answer_part = text
+                
+            # Limit text length for TTS
+            if len(answer_part) > 1000:
+                answer_part = answer_part[:1000] + "..."
+                
+            tts = gTTS(text=answer_part, lang='en', slow=False)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                tts.save(tmp_file.name)
+                st.audio(tmp_file.name, format="audio/mp3")
+                
         except Exception as e:
-            st.error(f"❌ Voice generation failed: {e}")
-            return None
-
-    def speech_to_text(self):
-        try:
-            r = sr.Recognizer()
-            with sr.Microphone() as source:
-                st.info("🎤 Listening... Speak now!")
-                audio = r.listen(source, timeout=10)
-                st.info("🔄 Processing speech...")
-                text = r.recognize_google(audio)
-                return text
-        except sr.WaitTimeoutError:
-            st.error("❌ No speech detected")
-            return None
-        except sr.UnknownValueError:
-            st.error("❌ Could not understand audio")
-            return None
-        except Exception as e:
-            st.error(f"❌ Voice input failed: {e}")
-            return None
+            st.error(f"Text-to-speech error: {e}")
 
 # =============================================================================
-# STREAMLIT APP - Simplified
+# STREAMLIT APP
 # =============================================================================
 class AuraPDFQAApp:
     def __init__(self):
+        self.setup_session_state()
+        self.llm_service = LLMService()
+        self.voice_service = VoiceService()
+        self.setup_ui()
+
+    def setup_session_state(self):
+        """Initialize session state variables"""
         if 'pdf_processed' not in st.session_state:
             st.session_state.pdf_processed = False
         if 'messages' not in st.session_state:
             st.session_state.messages = []
         if 'doc_processor' not in st.session_state:
             st.session_state.doc_processor = DocumentProcessor()
-            
-        self.llm_service = LLMService()
-        self.voice_service = VoiceService()
-        self.setup_ui()
+        if 'processing_done' not in st.session_state:
+            st.session_state.processing_done = False
 
     def setup_ui(self):
-        st.set_page_config(page_title="Aura PDF QA", layout="wide")
+        """Setup Streamlit UI configuration"""
+        st.set_page_config(
+            page_title="Aura PDF QA ⚡",
+            page_icon="📚",
+            layout="wide",
+            initial_sidebar_state="expanded"
+        )
 
     def render_sidebar(self):
+        """Render the sidebar with controls"""
         st.sidebar.title("📚 Aura PDF QA")
+        st.sidebar.markdown("---")
         
-        uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
+        # File upload
+        uploaded_file = st.sidebar.file_uploader(
+            "Upload PDF Document", 
+            type="pdf",
+            help="Upload a PDF file to analyze"
+        )
         
-        if uploaded_file:
-            st.sidebar.write(f"**File:** {uploaded_file.name}")
-            if st.sidebar.button("🚀 Process Document", use_container_width=True):
-                with st.spinner("Processing PDF..."):
+        # Status display
+        st.sidebar.markdown("### Status")
+        if st.session_state.pdf_processed:
+            st.sidebar.success("✅ PDF Ready for Questions!")
+            if hasattr(st.session_state, 'pdf_name'):
+                st.sidebar.info(f"**Document:** {st.session_state.pdf_name}")
+        else:
+            st.sidebar.warning("⚠️ Upload PDF to Start")
+        
+        # Processing button
+        if uploaded_file and not st.session_state.processing_done:
+            if st.sidebar.button("🚀 Process Document", type="primary", use_container_width=True):
+                with st.spinner("Processing PDF... This may take a few moments"):
                     count = st.session_state.doc_processor.process_pdf(uploaded_file)
                     if count > 0:
                         st.session_state.pdf_processed = True
                         st.session_state.pdf_name = uploaded_file.name
-                        st.sidebar.success(f"✅ PDF processed!")
+                        st.session_state.processing_done = True
                         st.rerun()
+                    else:
+                        st.session_state.pdf_processed = False
+                        st.session_state.processing_done = False
         
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### 🎤 Voice Input")
-        if st.sidebar.button("🎤 Ask by Voice", use_container_width=True):
-            voice_question = self.voice_service.speech_to_text()
-            if voice_question:
-                st.session_state.voice_question = voice_question
-                st.rerun()
+        # Configuration
+        st.sidebar.markdown("### Configuration")
+        top_k = st.sidebar.slider(
+            "Number of sources", 
+            min_value=1, 
+            max_value=5, 
+            value=3,
+            help="How many text chunks to use for answering"
+        )
+        
+        enable_voice = st.sidebar.checkbox(
+            "Enable Voice Output", 
+            value=True,
+            help="Convert answers to speech"
+        )
+        
+        # Reset button
+        if st.sidebar.button("🔄 Reset Session", use_container_width=True):
+            self.reset_session()
+            
+        return top_k, enable_voice
 
-    def render_chat(self):
-        st.title("Aura PDF QA")
+    def reset_session(self):
+        """Reset the session state"""
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+    def render_chat(self, top_k, enable_voice):
+        """Render the main chat interface"""
+        st.title("Aura PDF QA ⚡")
+        st.markdown("Ask questions about your document and get AI-powered answers with source references")
+        st.markdown("---")
         
+        # Show processing status
         if not st.session_state.pdf_processed:
-            st.info("📝 Upload a PDF and click 'Process Document' to start")
+            self.render_welcome_screen()
             return
 
         # Display chat messages
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
-                if msg.get("audio"):
-                    st.audio(msg["audio"], format="audio/mp3")
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-        # Handle voice question
-        if 'voice_question' in st.session_state:
-            question = st.session_state.voice_question
-            del st.session_state.voice_question
-        else:
-            question = st.chat_input("Ask a question or use voice...")
+        # Chat input
+        if prompt := st.chat_input("Ask a question about your document..."):
+            self.handle_user_query(prompt, top_k, enable_voice)
 
-        if question:
-            # Add user message
-            st.session_state.messages.append({"role": "user", "content": question})
+    def render_welcome_screen(self):
+        """Render welcome screen when no PDF is processed"""
+        st.info("👋 Welcome to Aura PDF QA!")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("### 📤 Upload")
+            st.write("1. Go to the sidebar")
+            st.write("2. Upload your PDF file")
             
-            # Generate answer
-            with st.chat_message("assistant"):
-                with st.spinner("🔍 Searching..."):
-                    chunks = st.session_state.doc_processor.search_similar(question, 3)
-                    answer, pages = self.llm_service.generate_answer(question, chunks)
+        with col2:
+            st.markdown("### ⚙️ Process")
+            st.write("3. Click 'Process Document'")
+            st.write("4. Wait for processing to complete")
+            
+        with col3:
+            st.markdown("### 💬 Chat")
+            st.write("5. Start asking questions!")
+            st.write("6. Get answers with sources")
+        
+        st.markdown("---")
+        st.markdown("### 💡 Tips for better results:")
+        st.write("- Use clear, specific questions")
+        st.write("- Ask about topics likely covered in your document")
+        st.write("- For large documents, processing may take a minute")
+
+    def handle_user_query(self, question, top_k, enable_voice):
+        """Handle user question and generate response"""
+        # Add user message to chat
+        st.session_state.messages.append({"role": "user", "content": question})
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Searching document..."):
+                try:
+                    start_time = time.time()
+                    
+                    # Search for relevant chunks
+                    chunks = st.session_state.doc_processor.search_similar(question, top_k)
+                    
+                    # Generate answer
+                    answer, confidence = self.llm_service.generate_answer(question, chunks)
+                    
+                    # Calculate response time
+                    response_time = (time.time() - start_time) * 1000
                     
                     # Display answer
-                    if pages:
-                        st.write(f"{answer}")
-                        st.caption(f"📄 Pages: {', '.join(map(str, pages))}")
-                    else:
-                        st.write(answer)
+                    st.markdown(answer)
                     
-                    # Generate and play audio
-                    audio_file = self.voice_service.text_to_speech(answer)
-                    if audio_file:
-                        st.audio(audio_file, format="audio/mp3")
-                        # Store audio in message
-                        st.session_state.messages.append({
-                            "role": "assistant", 
-                            "content": answer,
-                            "audio": audio_file
-                        })
-                    else:
-                        st.session_state.messages.append({
-                            "role": "assistant", 
-                            "content": answer
-                        })
+                    # Show metrics
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.caption(f"⏱️ {response_time:.0f}ms")
+                    with col2:
+                        st.caption(f"🎯 Confidence: {confidence:.1%}")
+                    
+                    # Voice output if enabled
+                    if enable_voice and confidence > 0.2:
+                        with st.spinner("🎵 Generating audio..."):
+                            self.voice_service.speak_text(answer)
+                            
+                except Exception as e:
+                    error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
+                    st.error(error_msg)
+                    answer = error_msg
+        
+        # Add assistant response to chat history
+        st.session_state.messages.append({"role": "assistant", "content": answer})
 
     def run(self):
-        self.render_sidebar()
-        self.render_chat()
+        """Main application runner"""
+        try:
+            top_k, enable_voice = self.render_sidebar()
+            self.render_chat(top_k, enable_voice)
+        except Exception as e:
+            st.error(f"Application error: {str(e)}")
+            st.info("Please refresh the page and try again.")
 
 if __name__ == "__main__":
     app = AuraPDFQAApp()
