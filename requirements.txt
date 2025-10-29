@@ -1,12 +1,22 @@
+# Streamlit and UI
 streamlit==1.28.0
-PyPDF2==3.0.1
-sentence-transformers==2.2.2
-faiss-cpu==1.7.4
-numpy==1.26.5
-pytesseract==0.3.11
-pdf2image==1.16.3
-Pillow==10.1.0
 rich==14.2.0
 markdown-it-py==4.0.0
 mdurl==0.1.2
 pygments==2.19.2
+
+# PDF & OCR processing
+PyPDF2==3.0.1
+pytesseract==0.3.11
+pdf2image==1.16.3
+Pillow==10.1.0
+
+# Embeddings and ML
+sentence-transformers==2.2.2
+faiss-cpu==1.7.4
+numpy==1.26.5
+
+# Optional (if using voice & audio)
+gTTS==2.3.2
+SpeechRecognition==3.10.0
+pyttsx3==2.90
