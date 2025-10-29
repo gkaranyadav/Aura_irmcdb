@@ -1,483 +1,299 @@
-# app.py - IRMC AskPro ⚡ WITH CURRENT GROQ MODELS
-import streamlit as st
-import tempfile
-import os
-from datetime import datetime
-import uuid
-import logging
-from PyPDF2 import PdfReader
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-from databricks.sdk import WorkspaceClient
-import time
-import re
-import requests
-import json
+# app.py - Aura PDF QA ⚡
+# Import all necessary libraries
+import streamlit as st  # For creating web interface
+import tempfile, os, uuid, time  # For file handling and utilities
+from PyPDF2 import PdfReader  # For reading PDF files
+from sentence_transformers import SentenceTransformer  # For text embeddings
+import faiss  # For similarity search
+import numpy as np  # For numerical operations
+import pytesseract  # For OCR text extraction
+from PIL import Image  # For image processing
+import pdf2image  # For converting PDF to images
+from gtts import gTTS  # For text-to-speech
+from groq import Groq  # For Groq LLM API
 
 # =============================================================================
-# CONFIGURATION
+# CONFIGURATION SETTINGS
 # =============================================================================
 class Config:
-    DATABRICKS_HOST = "https://dbc-484c2988-d6e6.cloud.databricks.com"
-    DATABRICKS_TOKEN = "dapiaa126510ff360ca569ec6d125bc727d1"
-    EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
-    
-    # Groq API Configuration
-    GROQ_API_KEY = "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"
-    GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+    EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"  # Model for text embeddings
+    GROQ_MODEL = "llama-3.1-70b-versatile"  # Groq model for answering questions
+    TOP_K_CHUNKS = 3  # Number of text chunks to retrieve
+    CHUNK_SIZE = 500  # Maximum size of each text chunk
+    MIN_PARAGRAPH_LENGTH = 20  # Minimum length for paragraphs
 
 # =============================================================================
-# GROQ LLM SERVICE - CURRENT MODELS ONLY
-# =============================================================================
-class GroqLLMService:
-    def __init__(self):
-        self.api_key = Config.GROQ_API_KEY
-        self.api_url = Config.GROQ_API_URL
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        # CURRENT GROQ MODELS (From their deprecation page)
-        self.available_models = [
-            "llama-3.3-70b-versatile",      # Main production model
-            "llama-3.1-8b-instant",         # Fastest model
-            "meta-llama/llama-4-scout-17b-16e-instruct",  # Latest vision/model
-            "openai/gpt-oss-120b",          # Large model alternative
-            "qwen/qwen3-32b",               # Good for complex reasoning
-            "moonshotai/kimi-k2-instruct-0905",  # Large context
-            "whisper-large-v3-turbo",       # For audio (if needed)
-            "meta-llama/llama-guard-4-12b"  # For safety
-        ]
-        self.current_model = "llama-3.3-70b-versatile"  # Best overall model
-    
-    def call_groq(self, prompt, max_tokens=1024):
-        """Call Groq API with current production models"""
-        try:
-            payload = {
-                "messages": [
-                    {
-                        "role": "user", 
-                        "content": prompt
-                    }
-                ],
-                "model": self.current_model,
-                "temperature": 0.1,  # Low temperature for factual answers
-                "max_tokens": max_tokens,
-                "top_p": 0.9,
-                "stream": False
-            }
-            
-            response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result["choices"][0]["message"]["content"]
-            else:
-                error_msg = response.text
-                # If model not found, try the main alternatives
-                if "model_decommissioned" in error_msg or "not found" in error_msg:
-                    return self._try_production_models(prompt, max_tokens)
-                else:
-                    return f"❌ Groq API Error: {response.status_code} - {error_msg}"
-                
-        except Exception as e:
-            return f"❌ Groq Connection Error: {str(e)}"
-    
-    def _try_production_models(self, prompt, max_tokens):
-        """Try production models that should definitely work"""
-        production_models = [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant", 
-            "qwen/qwen3-32b"
-        ]
-        
-        for model in production_models:
-            try:
-                st.info(f"🔄 Trying production model: {model}")
-                payload = {
-                    "messages": [{"role": "user", "content": prompt}],
-                    "model": model,
-                    "temperature": 0.1,
-                    "max_tokens": max_tokens,
-                    "top_p": 0.9,
-                    "stream": False
-                }
-                
-                response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=30)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    st.success(f"✅ Success with model: {model}")
-                    self.current_model = model  # Switch to working model
-                    return result["choices"][0]["message"]["content"]
-                else:
-                    continue
-                    
-            except Exception as e:
-                continue
-        
-        return "❌ All Groq production models failed. Please check your API key or try again later."
-    
-    def generate_answer(self, question, context_chunks):
-        """Generate intelligent answer using Groq LLM"""
-        try:
-            if not context_chunks:
-                return self._no_results_template(question), 0.0
-            
-            avg_confidence = sum(chunk['similarity'] for chunk in context_chunks) / len(context_chunks)
-            
-            # Use Groq to analyze and generate intelligent answer
-            answer = self._analyze_with_groq(question, context_chunks, avg_confidence)
-            
-            return answer, avg_confidence
-            
-        except Exception as e:
-            return f"Error: {str(e)}", 0.0
-    
-    def _no_results_template(self, question):
-        return f"""
-**❌ No relevant information found for:** "{question}"
-
-**💡 Suggestions:**
-- Try different keywords or rephrase your question
-- Ask about general topics in the document
-- Check if the PDF contains relevant information
-"""
-    
-    def _analyze_with_groq(self, question, context_chunks, confidence):
-        """Use Groq LLM to analyze context and generate precise answer"""
-        
-        # Prepare context for LLM
-        context_text = "\n\n".join([
-            f"[Source {i+1}, Page {chunk['metadata']['page']}, Confidence: {chunk['similarity']:.1%}]: {chunk['content']}"
-            for i, chunk in enumerate(context_chunks)
-        ])
-        
-        # Create intelligent prompt for Groq
-        prompt = f"""You are an expert document analyst. Based EXACTLY on the following document excerpts, answer the question clearly and accurately.
-
-DOCUMENT CONTEXT:
-{context_text}
-
-QUESTION: {question}
-
-CRITICAL INSTRUCTIONS:
-1. Answer using ONLY information from the provided context
-2. If the exact answer isn't in the context, say "The document doesn't contain specific information about this"
-3. Be precise - if asking for numbers, percentages, dates, provide exact figures from context
-4. Cite sources when possible (mention page numbers)
-5. If analyzing "why" or "reasons", extract the causal explanations from context
-6. Keep the answer focused and directly relevant to the question
-
-ANSWER:"""
-        
-        # Get Groq LLM response
-        llm_response = self.call_groq(prompt)
-        
-        # Format the final answer
-        answer = f"""
-**🤔 Your Question:** {question}
-
-**📊 Analysis Results:** Found {len(context_chunks)} relevant sections with {confidence:.1%} confidence
-
-**💡 Intelligent Answer (Powered by Groq {self.current_model}):**
-
-{llm_response}
-
-**🔍 Source Analysis:** Based on information from pages {', '.join(set(str(chunk['metadata']['page']) for chunk in context_chunks))}
-"""
-        
-        return answer
-
-# =============================================================================
-# DOCUMENT PROCESSOR (SAME - IT'S GOOD)
+# DOCUMENT PROCESSOR - Handles PDF reading and text extraction
 # =============================================================================
 class DocumentProcessor:
     def __init__(self):
         try:
-            st.info("🔄 Loading AI models...")
+            # Load the embedding model for converting text to vectors
             self.embedder = SentenceTransformer(Config.EMBEDDING_MODEL)
-            self.index = None
-            self.chunks = []
-            self.chunk_metadata = []
-            st.success("✅ Document processor ready!")
+            self.index = None  # Will store the search index
+            self.chunks = []  # Will store text chunks from PDF
+            self.chunk_metadata = []  # Will store info about each chunk
+            st.success("✅ Document processor ready")  # Show success message
         except Exception as e:
-            st.error(f"❌ Model loading failed: {e}")
-    
-    def smart_chunking(self, text, page_num):
-        """Intelligent chunking that preserves context"""
-        chunks = []
-        
-        # First, split by paragraphs
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-        
-        for para in paragraphs:
-            if len(para) <= 300:
-                # Short paragraph - keep as is
-                chunks.append(para)
-                self.chunk_metadata.append({
-                    "page": page_num,
-                    "type": "paragraph",
-                    "length": len(para)
-                })
-            else:
-                # Long paragraph - split by sentences but preserve context
-                sentences = re.split(r'(?<=[.!?])\s+', para)
-                current_chunk = ""
-                
-                for sentence in sentences:
-                    if len(current_chunk + sentence) < 400:
-                        current_chunk += sentence + " "
-                    else:
-                        if current_chunk:
-                            chunks.append(current_chunk.strip())
-                            self.chunk_metadata.append({
-                                "page": page_num,
-                                "type": "logical_chunk",
-                                "length": len(current_chunk)
-                            })
-                        current_chunk = sentence + " "
-                
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                    self.chunk_metadata.append({
-                        "page": page_num,
-                        "type": "logical_chunk", 
-                        "length": len(current_chunk)
-                    })
-        
-        return chunks
-    
-    def process_pdf(self, pdf_file):
+            st.error(f"❌ Document processor failed: {e}")  # Show error if failed
+
+    def extract_text_direct(self, pdf_path):
+        # Extract text directly from PDF (for text-based PDFs)
+        reader = PdfReader(pdf_path)  # Create PDF reader object
+        extracted = []  # List to store extracted text
+        # Loop through each page in PDF
+        for i, page in enumerate(reader.pages, 1):
+            text = page.extract_text() or ""  # Extract text, use empty string if None
+            if text.strip():  # If text is not empty
+                extracted.append({"page": i, "text": text.strip()})  # Store page number and text
+        return extracted  # Return all extracted text
+
+    def extract_text_ocr(self, pdf_path):
+        # Extract text using OCR (for scanned PDFs)
+        images = pdf2image.convert_from_path(pdf_path, dpi=200)  # Convert PDF to images
+        extracted = []  # List to store OCR results
+        progress_bar = st.progress(0)  # Create progress bar
+        status_text = st.empty()  # Create empty text for status updates
+        # Process each image
+        for i, image in enumerate(images):
+            status_text.text(f"📷 OCR page {i+1}/{len(images)}")  # Update status
+            text = pytesseract.image_to_string(image)  # Extract text from image using OCR
+            if text.strip():  # If text found
+                extracted.append({"page": i + 1, "text": text.strip()})  # Store result
+            progress_bar.progress((i + 1) / len(images))  # Update progress bar
+        status_text.text("✅ OCR complete")  # Show completion message
+        return extracted  # Return OCR results
+
+    def analyze_pdf_type(self, pdf_path):
+        # Determine if PDF is text-based or scanned
+        reader = PdfReader(pdf_path)  # Create PDF reader
+        # Count pages with substantial text
+        text_pages = sum(1 for page in reader.pages if len((page.extract_text() or "").strip()) > 50)
+        total_pages = len(reader.pages)  # Total number of pages
+        # Return "text_based" if more than 50% pages have text, else "scanned"
+        return "text_based" if total_pages == 0 or text_pages / total_pages > 0.5 else "scanned"
+
+    def process_pdf(self, uploaded_file):
+        # Main method to process uploaded PDF
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")  # Create temp file
+        tmp_file.write(uploaded_file.getvalue())  # Write uploaded content to temp file
+        tmp_file.close()  # Close file
+        pdf_path = tmp_file.name  # Get temp file path
+
         try:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                tmp_file.write(pdf_file.getvalue())
-                tmp_path = tmp_file.name
-            
-            status_text.text("📖 Reading PDF...")
-            reader = PdfReader(tmp_path)
-            total_pages = len(reader.pages)
-            
-            self.chunks = []
-            self.chunk_metadata = []
-            
-            for page_num, page in enumerate(reader.pages, 1):
-                status_text.text(f"📄 Processing page {page_num}/{total_pages}...")
-                progress_bar.progress(page_num / total_pages)
-                
-                text = page.extract_text() or ""
-                
-                if text.strip():
-                    # Clean text
-                    clean_text = re.sub(r'\s+', ' ', text).strip()
-                    
-                    # Use smart chunking
-                    page_chunks = self.smart_chunking(clean_text, page_num)
-                    self.chunks.extend(page_chunks)
-            
-            # Create embeddings
-            if self.chunks:
-                status_text.text("🧠 Creating search index...")
-                embeddings = self.embedder.encode(self.chunks)
-                self.index = faiss.IndexFlatL2(embeddings.shape[1])
-                self.index.add(np.array(embeddings))
-                
-                status_text.text("✅ Complete!")
-                progress_bar.progress(100)
-                
-                st.success(f"✅ Success! Processed {len(self.chunks)} intelligent chunks from {total_pages} pages")
-                return len(self.chunks)
+            st.info("🔍 Analyzing PDF type...")  # Show analysis message
+            pdf_type = self.analyze_pdf_type(pdf_path)  # Determine PDF type
+            st.info(f"PDF type detected: {pdf_type}")  # Show detected type
+
+            # Extract text based on PDF type
+            if pdf_type == "text_based":
+                extracted = self.extract_text_direct(pdf_path)  # Use direct text extraction
+                method = "text"  # Set method flag
             else:
-                st.error("❌ No text found in PDF!")
-                return 0
-                
-        except Exception as e:
-            st.error(f"❌ Processing failed: {str(e)}")
-            return 0
+                extracted = self.extract_text_ocr(pdf_path)  # Use OCR extraction
+                method = "ocr"  # Set method flag
+
+            # Split text into chunks for processing
+            self.chunks, self.chunk_metadata = [], []  # Reset chunks and metadata
+            for item in extracted:  # Process each extracted page
+                page = item["page"]  # Get page number
+                # Split text into paragraphs
+                paragraphs = [p.strip() for p in item["text"].split("\n\n") if len(p.strip()) >= Config.MIN_PARAGRAPH_LENGTH]
+                for para in paragraphs:  # Process each paragraph
+                    if len(para) > Config.CHUNK_SIZE:  # If paragraph is too long
+                        sentences = para.split(". ")  # Split into sentences
+                        chunk = ""  # Initialize chunk
+                        for s in sentences:  # Process each sentence
+                            if len(chunk + s) < Config.CHUNK_SIZE:  # If chunk not full
+                                chunk += s + ". "  # Add sentence to chunk
+                            else:  # If chunk is full
+                                self.chunks.append(chunk.strip())  # Save current chunk
+                                self.chunk_metadata.append({"page": page, "method": method})  # Save metadata
+                                chunk = s + ". "  # Start new chunk
+                        if chunk:  # If remaining text
+                            self.chunks.append(chunk.strip())  # Save last chunk
+                            self.chunk_metadata.append({"page": page, "method": method})  # Save metadata
+                    else:  # If paragraph fits in one chunk
+                        self.chunks.append(para)  # Save paragraph as chunk
+                        self.chunk_metadata.append({"page": page, "method": method})  # Save metadata
+
+            if not self.chunks:  # If no text extracted
+                st.error("❌ No text extracted from PDF.")  # Show error
+                return 0  # Return 0 chunks
+
+            # Create embeddings and search index
+            st.info("🧠 Creating embeddings...")  # Show embedding message
+            embeddings = self.embedder.encode(self.chunks)  # Convert chunks to vectors
+            self.index = faiss.IndexFlatL2(embeddings.shape[1])  # Create FAISS index
+            self.index.add(np.array(embeddings))  # Add embeddings to index
+            st.success(f"✅ PDF processed: {len(self.chunks)} chunks created")  # Show success
+            return len(self.chunks)  # Return number of chunks
+
         finally:
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
-    
-    def search_similar(self, query, top_k=5):
-        if self.index is None or len(self.chunks) == 0:
-            return []
-        
-        try:
-            with st.spinner("🔍 Finding relevant content..."):
-                query_embedding = self.embedder.encode([query])
-                distances, indices = self.index.search(np.array(query_embedding), top_k)
-                
-                results = []
-                for i, idx in enumerate(indices[0]):
-                    if idx < len(self.chunks):
-                        similarity = 1 / (1 + distances[0][i])
-                        if similarity > 0.1:  # Filter out very low similarity
-                            results.append({
-                                "content": self.chunks[idx],
-                                "metadata": self.chunk_metadata[idx],
-                                "similarity": round(similarity, 3)
-                            })
-                
-                results.sort(key=lambda x: x['similarity'], reverse=True)
-                return results
-        except Exception as e:
-            st.error(f"Search error: {e}")
-            return []
+            os.unlink(pdf_path)  # Clean up temp file
+
+    def search_similar(self, query, top_k=3):
+        # Search for similar text chunks
+        if not self.chunks or self.index is None:  # If no data processed
+            return []  # Return empty list
+
+        query_vec = self.embedder.encode([query])  # Convert query to vector
+        distances, indices = self.index.search(np.array(query_vec), top_k)  # Search index
+        results = []  # List for results
+        for i, idx in enumerate(indices[0]):  # Process each result
+            if idx < len(self.chunks):  # If valid index
+                sim = 1 / (1 + distances[0][i])  # Calculate similarity score
+                # Add result to list
+                results.append({"content": self.chunks[idx], "metadata": self.chunk_metadata[idx], "similarity": round(sim, 3)})
+        results.sort(key=lambda x: x["similarity"], reverse=True)  # Sort by similarity
+        return results  # Return sorted results
 
 # =============================================================================
-# VOICE SERVICE
+# GROQ LLM SERVICE - Handles AI responses using Groq
+# =============================================================================
+class LLMService:
+    def __init__(self):
+        # Initialize Groq client with API key
+        self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+    def generate_answer(self, question, chunks):
+        if not chunks:  # If no relevant chunks found
+            return f"❌ No relevant info found for '{question}'", 0.0  # Return error
+        
+        # Calculate average confidence from chunks
+        avg_conf = sum(c["similarity"] for c in chunks)/len(chunks)
+        
+        # Prepare context from chunks for the AI
+        context = "\n\n".join([f"Page {c['metadata']['page']}: {c['content']}" for c in chunks])
+        
+        # Create prompt for Groq
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful AI assistant that answers questions based on the provided document context. Provide accurate, concise answers and cite page numbers."
+            },
+            {
+                "role": "user", 
+                "content": f"Context from document:\n{context}\n\nQuestion: {question}\n\nAnswer based on the context above:"
+            }
+        ]
+        
+        try:
+            # Get response from Groq API
+            response = self.client.chat.completions.create(
+                model=Config.GROQ_MODEL,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=1024
+            )
+            
+            # Extract AI response
+            ai_answer = response.choices[0].message.content
+            
+            # Format final answer with sources
+            answer = f"**Question:** {question}\n\n**Answer:**\n{ai_answer}\n\n**Sources:**\n"
+            for i, c in enumerate(chunks):
+                answer += f"• Page {c['metadata']['page']} (Confidence: {c['similarity']:.1%})\n"
+            
+            return answer, avg_conf  # Return answer and confidence
+            
+        except Exception as e:
+            return f"❌ Error generating answer: {str(e)}", 0.0  # Return error
+
+# =============================================================================
+# VOICE SERVICE - Handles text-to-speech
 # =============================================================================
 class VoiceService:
-    def text_to_speech_html(self, text):
-        clean_text = text.replace('"', '\\"').replace("'", "\\'")[:500]
-        html = f"""
-        <script>
-        function speak() {{
-            if ('speechSynthesis' in window) {{
-                var msg = new SpeechSynthesisUtterance();
-                msg.text = "{clean_text}";
-                msg.rate = 0.8;
-                window.speechSynthesis.speak(msg);
-            }}
-        }}
-        speak();
-        </script>
-        """
-        return html
+    def speak_text(self, text):
+        tts = gTTS(text)  # Create text-to-speech object
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")  # Create temp file
+        tts.save(tmp_file.name)  # Save audio to file
+        st.audio(tmp_file.name, format="audio/mp3")  # Display audio player
 
 # =============================================================================
-# MAIN APP
+# STREAMLIT APP - Main application class
 # =============================================================================
-def main():
-    st.set_page_config(
-        page_title="IRMC AskPro ⚡",
-        page_icon="📚", 
-        layout="wide"
-    )
-    
-    # Initialize services
-    if 'processor' not in st.session_state:
-        st.session_state.processor = DocumentProcessor()
-    if 'llm' not in st.session_state:
-        st.session_state.llm = GroqLLMService()
-    if 'voice' not in st.session_state:
-        st.session_state.voice = VoiceService()
-    
-    # Sidebar
-    with st.sidebar:
-        st.title("📚 IRMC AskPro")
-        st.markdown("---")
-        
-        # File upload
-        uploaded_file = st.file_uploader("Upload PDF", type="pdf")
-        if uploaded_file:
-            st.info(f"**File:** {uploaded_file.name}")
-            
-            if st.button("🔄 Process Document", type="primary", use_container_width=True):
-                with st.spinner("Processing with AI..."):
-                    chunk_count = st.session_state.processor.process_pdf(uploaded_file)
-                    if chunk_count > 0:
-                        st.session_state.pdf_processed = True
-                        st.session_state.pdf_name = uploaded_file.name
-                        st.rerun()
-        
-        if st.session_state.get('pdf_processed'):
-            st.success(f"✅ **Ready:** {st.session_state.pdf_name}")
-        
-        st.markdown("---")
-        st.markdown("**🚀 Powered by:**")
-        st.markdown("- 🦙 Groq Llama 3.3 70B")
-        st.markdown("- ⚡ World's Fastest LLM")
-        st.markdown("- 🧠 Intelligent Analysis")
-        st.markdown("- 📊 Precise Answers")
-    
-    # Main area
-    st.title("IRMC AskPro ⚡")
-    st.markdown("**AI-Powered Document Analysis with Groq LLM**")
-    
-    # Initialize chat
-    if 'messages' not in st.session_state:
-        st.session_state.messages = []
-    if 'pdf_processed' not in st.session_state:
-        st.session_state.pdf_processed = False
-    
-    # Show upload reminder
-    if not st.session_state.pdf_processed:
-        st.info("📄 **Upload a PDF to start intelligent document analysis**")
-        st.markdown("""
-        **How it works:**
-        1. 📤 Upload any PDF document
-        2. 🔄 AI processes with intelligent chunking  
-        3. 💬 Ask complex, specific questions
-        4. 🦙 Groq Llama 3.3 70B analyzes and answers
-        
-        **Ask about:**
-        - Specific numbers and statistics
-        - Complex concepts and relationships  
-        - "Why" and causal explanations
-        - Financial data and projections
-        - Dates, percentages, exact figures
-        """)
-    
-    # Display chat history
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-    
-    # Chat input
-    question = st.chat_input("Ask complex questions about your document...")
-    
-    # Process question
-    if question and st.session_state.pdf_processed:
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": question})
-        
-        with st.chat_message("user"):
-            st.markdown(question)
-        
-        # Generate answer
-        with st.chat_message("assistant"):
-            with st.spinner("🧠 Analyzing with Groq LLM..."):
-                start_time = time.time()
-                
-                # Search for relevant content
-                context_chunks = st.session_state.processor.search_similar(question, top_k=5)
-                
-                # Generate intelligent answer using Groq
-                answer, confidence = st.session_state.llm.generate_answer(question, context_chunks)
-                
-                response_time = time.time() - start_time
-            
-            # Display answer
-            st.markdown(answer)
-            
-            # Show detailed sources
-            if context_chunks:
-                with st.expander("📋 View Source Context"):
-                    for i, chunk in enumerate(context_chunks):
-                        st.write(f"**Source {i+1}** (Page {chunk['metadata']['page']}, Confidence: {chunk['similarity']:.1%})")
-                        st.text(chunk['content'][:400] + "..." if len(chunk['content']) > 400 else chunk['content'])
-                        st.markdown("---")
-            
-            # Response time and confidence
-            st.caption(f"⏱️ Groq Analysis Time: {response_time:.2f}s | Confidence: {confidence:.1%}")
-            
-            # Voice button
-            if st.button("🔊 Speak Answer", key="speak"):
-                js_code = st.session_state.voice.text_to_speech_html(answer)
-                st.components.v1.html(js_code, height=0)
-        
-        # Add to history
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        
-    elif question and not st.session_state.pdf_processed:
-        st.error("❌ Please upload and process a PDF document first!")
+class AuraPDFQAApp:
+    def __init__(self):
+        self.doc_processor = DocumentProcessor()  # Create document processor
+        self.llm_service = LLMService()  # Create LLM service
+        self.voice_service = VoiceService()  # Create voice service
+        self.setup_ui()  # Setup user interface
 
+    def setup_ui(self):
+        st.set_page_config(page_title="Aura PDF QA ⚡", layout="wide")  # Configure page
+
+    def render_sidebar(self):
+        st.sidebar.title("📚 Aura PDF QA")  # Sidebar title
+        
+        # File uploader for PDF
+        uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
+        
+        # Process button
+        if uploaded_file and st.sidebar.button("Process Document"):
+            count = self.doc_processor.process_pdf(uploaded_file)  # Process PDF
+            if count > 0:  # If successful
+                st.session_state.pdf_processed = True  # Set flag
+                st.session_state.pdf_name = uploaded_file.name  # Store PDF name
+                st.success(f"PDF processed with {count} chunks.")  # Show success
+        
+        # Settings
+        top_k = st.sidebar.slider("Sources to retrieve", 1, 5, 3)  # Number of sources
+        enable_voice = st.sidebar.checkbox("Enable Voice", True)  # Voice toggle
+        
+        return top_k, enable_voice  # Return settings
+
+    def render_chat(self, top_k, enable_voice):
+        st.title("Aura PDF QA ⚡")  # Main title
+        st.markdown("Ask questions about your document and get AI-powered answers")  # Subtitle
+        
+        # Initialize session state for messages
+        if 'messages' not in st.session_state:
+            st.session_state.messages = []  # Empty message history
+        
+        # Initialize PDF processed flag
+        if 'pdf_processed' not in st.session_state:
+            st.session_state.pdf_processed = False  # Not processed initially
+
+        # Display chat messages
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):  # Create chat bubble
+                st.markdown(msg["content"])  # Display message content
+
+        # Chat input
+        question = st.chat_input("Ask a question...")
+        if question:
+            if not st.session_state.pdf_processed:  # If no PDF processed
+                st.error("Upload and process a PDF first!")  # Show error
+                return
+            
+            # Add user question to history
+            st.session_state.messages.append({"role": "user", "content": question})
+            
+            with st.chat_message("assistant"):  # Assistant response
+                with st.spinner("Searching..."):  # Show loading spinner
+                    start = time.time()  # Start timer
+                    chunks = self.doc_processor.search_similar(question, top_k)  # Search for relevant chunks
+                    answer, conf = self.llm_service.generate_answer(question, chunks)  # Generate answer
+                    elapsed = (time.time() - start) * 1000  # Calculate response time
+                    
+                    st.markdown(answer)  # Display answer
+                    st.caption(f"⏱️ {elapsed:.0f}ms | Confidence: {conf:.1%}")  # Show metrics
+                    
+                    # Play voice if enabled and confident
+                    if enable_voice and conf > 0.1:
+                        self.voice_service.speak_text(answer)  # Convert to speech
+            
+            # Add assistant answer to history
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+
+    def run(self):
+        top_k, enable_voice = self.render_sidebar()  # Render sidebar and get settings
+        self.render_chat(top_k, enable_voice)  # Render main chat interface
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
 if __name__ == "__main__":
-    main()
+    app = AuraPDFQAApp()  # Create app instance
+    app.run()  # Run the app
