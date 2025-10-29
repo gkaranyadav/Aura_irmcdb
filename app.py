@@ -274,7 +274,7 @@ class AuraPDFQAApp:
                     st.experimental_rerun()
         st.sidebar.markdown("---")
         st.sidebar.markdown("Input mode:")
-        mode = st.sidebar.radio("", ["Text", "Voice"], index=0)
+        mode = st.sidebar.radio("Input mode", ["Text", "Voice"], index=0, label_visibility="collapsed")
         st.sidebar.checkbox("Auto voice responses", value=True, key="auto_voice")
         return mode
 
