@@ -223,11 +223,11 @@ class AuraPDFQAApp:
             st.session_state.doc_processor = DocumentProcessor()
         self.llm_service = LLMService()
         self.voice_service = VoiceService()
-        st.set_page_config(page_title="Aura PDF QA ⚡", layout="wide")
+        st.set_page_config(page_title="📚 IRMC Aura", layout="wide")
 
     # Sidebar UI
     def render_sidebar(self):
-        st.sidebar.title("📚 Aura PDF QA")  # Only heading here
+        st.sidebar.title("Fast & reliable ⚡")  # Only heading here
         uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
         if st.session_state.pdf_processed:
             st.sidebar.success("✅ PDF ready")
@@ -248,7 +248,7 @@ class AuraPDFQAApp:
 
     # Main chat
     def render_chat(self, top_k, enable_voice):
-        st.title("Aura PDF QA ⚡")  # Only one main heading
+        st.title("IRMC Aura 📚")  # Only one main heading
         if not st.session_state.pdf_processed:
             st.error("❌ Upload PDF and click Process first!")
             return
@@ -259,7 +259,7 @@ class AuraPDFQAApp:
         if question:
             st.session_state.messages.append({"role": "user", "content": question})
             with st.chat_message("assistant"):
-                with st.spinner("Processing PDF..."):  # Minimal message
+                with st.spinner("Just a sec........."):  # Minimal message
                     chunks = st.session_state.doc_processor.search_similar(question, top_k)
                     answer, conf = self.llm_service.generate_answer(question, chunks)
                     st.markdown(answer)
