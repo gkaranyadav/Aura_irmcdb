@@ -52,7 +52,7 @@ class DocumentProcessor:
         progress_bar = st.progress(0)
         status_text = st.empty()
         for i, image in enumerate(images):
-            status_text.text(f"Processing PDF... page {i+1}/{len(images)}")
+            status_text.text(f"Knowledge at your command page {i+1}/{len(images)}")
             text = pytesseract.image_to_string(image)
             if text.strip():
                 extracted.append({"page": i + 1, "text": text.strip()})
@@ -236,7 +236,7 @@ class AuraPDFQAApp:
         if uploaded_file:
             st.sidebar.write(f"**File:** {uploaded_file.name}")
             if st.sidebar.button("🚀 Process Document"):
-                with st.spinner("Knowledge at your command"):
+                with st.spinner("Processing....."):
                     count = st.session_state.doc_processor.process_pdf(uploaded_file)
                     if count > 0:
                         st.session_state.pdf_processed = True
