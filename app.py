@@ -1,3 +1,4 @@
+# app.py - Aura PDF QA ⚡
 import streamlit as st
 import tempfile, os, uuid, time
 from PyPDF2 import PdfReader
@@ -62,6 +63,11 @@ class DocumentProcessor:
         return "text_based" if total_pages == 0 or text_pages / total_pages > 0.5 else "scanned"
 
     def process_pdf(self, uploaded_file):
+        # Clear previous data
+        self.chunks = []
+        self.chunk_metadata = []
+        self.index = None
+        
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         tmp_file.write(uploaded_file.getvalue())
         tmp_file.close()
@@ -76,9 +82,11 @@ class DocumentProcessor:
             if pdf_type == "text_based":
                 extracted = self.extract_text_direct(pdf_path)
                 method = "text"
+                st.info(f"📄 Extracted text from {len(extracted)} pages")
             else:
                 extracted = self.extract_text_ocr(pdf_path)
                 method = "ocr"
+                st.info(f"📷 OCR processed {len(extracted)} pages")
 
             # Chunking
             self.chunks, self.chunk_metadata = [], []
@@ -93,15 +101,19 @@ class DocumentProcessor:
                             if len(chunk + s) < Config.CHUNK_SIZE:
                                 chunk += s + ". "
                             else:
-                                self.chunks.append(chunk.strip())
-                                self.chunk_metadata.append({"page": page, "method": method})
+                                if chunk.strip():
+                                    self.chunks.append(chunk.strip())
+                                    self.chunk_metadata.append({"page": page, "method": method})
                                 chunk = s + ". "
-                        if chunk:
+                        if chunk.strip():
                             self.chunks.append(chunk.strip())
                             self.chunk_metadata.append({"page": page, "method": method})
                     else:
-                        self.chunks.append(para)
-                        self.chunk_metadata.append({"page": page, "method": method})
+                        if para.strip():
+                            self.chunks.append(para)
+                            self.chunk_metadata.append({"page": page, "method": method})
+
+            st.info(f"📊 Created {len(self.chunks)} text chunks")
 
             if not self.chunks:
                 st.error("❌ No text extracted from PDF.")
@@ -115,11 +127,16 @@ class DocumentProcessor:
             st.success(f"✅ PDF processed: {len(self.chunks)} chunks created")
             return len(self.chunks)
 
+        except Exception as e:
+            st.error(f"❌ Processing failed: {str(e)}")
+            return 0
         finally:
-            os.unlink(pdf_path)
+            if os.path.exists(pdf_path):
+                os.unlink(pdf_path)
 
     def search_similar(self, query, top_k=3):
         if not self.chunks or self.index is None:
+            st.warning("⚠️ No document processed yet")
             return []
 
         query_vec = self.embedder.encode([query])
@@ -143,7 +160,7 @@ class LLMService:
         summary = self._summarize(chunks)
         answer = f"**Question:** {question}\n\n**Answer:**\n{summary}\n\n**Sources:**\n"
         for i, c in enumerate(chunks):
-            answer += f"Page {c['metadata']['page']} ({c['metadata']['method']}) | Conf: {c['similarity']:.1%}\n{c['content'][:200]}...\n\n"
+            answer += f"Page {c['metadata']['page']} | Confidence: {c['similarity']:.1%}\n{c['content'][:200]}...\n\n"
         return answer, avg_conf
 
     def _summarize(self, chunks):
@@ -167,49 +184,76 @@ class VoiceService:
 # =============================================================================
 class AuraPDFQAApp:
     def __init__(self):
-        self.doc_processor = DocumentProcessor()
+        # Initialize session state
+        if 'pdf_processed' not in st.session_state:
+            st.session_state.pdf_processed = False
+        if 'messages' not in st.session_state:
+            st.session_state.messages = []
+        if 'doc_processor' not in st.session_state:
+            st.session_state.doc_processor = DocumentProcessor()
+            
         self.llm_service = LLMService()
         self.voice_service = VoiceService()
         self.setup_ui()
 
     def setup_ui(self):
-        st.set_page_config(page_title="IRMC AskPro ⚡", layout="wide")
+        st.set_page_config(page_title="Aura PDF QA ⚡", layout="wide")
 
     def render_sidebar(self):
-        st.sidebar.title("📚 IRMC AskPro")
+        st.sidebar.title("📚 Aura PDF QA")
         uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
-        if uploaded_file and st.sidebar.button("Process Document"):
-            count = self.doc_processor.process_pdf(uploaded_file)
-            if count > 0:
-                st.session_state.pdf_processed = True
-                st.session_state.pdf_name = uploaded_file.name
-                st.success(f"PDF processed with {count} chunks.")
+        
+        # Show current status
+        if st.session_state.pdf_processed:
+            st.sidebar.success("✅ PDF is ready for questions!")
+        else:
+            st.sidebar.warning("⚠️ Upload and process a PDF to start")
+        
+        if uploaded_file:
+            st.sidebar.write(f"**File:** {uploaded_file.name}")
+            if st.sidebar.button("🚀 Process Document", type="primary", use_container_width=True):
+                with st.spinner("Processing PDF... This may take a few seconds"):
+                    count = st.session_state.doc_processor.process_pdf(uploaded_file)
+                    if count > 0:
+                        st.session_state.pdf_processed = True
+                        st.session_state.pdf_name = uploaded_file.name
+                        st.sidebar.success(f"✅ PDF processed with {count} chunks!")
+                        st.rerun()
+                    else:
+                        st.session_state.pdf_processed = False
+                        st.sidebar.error("❌ Failed to process PDF")
+        
         top_k = st.sidebar.slider("Sources to retrieve", 1, 5, 3)
         enable_voice = st.sidebar.checkbox("Enable Voice", True)
         return top_k, enable_voice
 
     def render_chat(self, top_k, enable_voice):
-        st.title("IRMC AskPro ⚡")
+        st.title("Aura PDF QA ⚡")
         st.markdown("Ask questions about your document and get AI-powered answers")
-        if 'messages' not in st.session_state:
-            st.session_state.messages = []
-        if 'pdf_processed' not in st.session_state:
-            st.session_state.pdf_processed = False
+        
+        # Show processing status clearly
+        if not st.session_state.pdf_processed:
+            st.error("❌ Please upload a PDF and click 'Process Document' first!")
+            st.info("📝 Steps to use:")
+            st.write("1. Upload PDF in sidebar")
+            st.write("2. Click 'Process Document' button")  
+            st.write("3. Wait for processing to complete")
+            st.write("4. Start asking questions!")
+            return
 
+        # Display chat messages
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        question = st.chat_input("Ask a question...")
+        # Chat input
+        question = st.chat_input("Ask a question about your document...")
         if question:
-            if not st.session_state.pdf_processed:
-                st.error("Upload and process a PDF first!")
-                return
             st.session_state.messages.append({"role": "user", "content": question})
             with st.chat_message("assistant"):
-                with st.spinner("Searching..."):
+                with st.spinner("Searching for answers..."):
                     start = time.time()
-                    chunks = self.doc_processor.search_similar(question, top_k)
+                    chunks = st.session_state.doc_processor.search_similar(question, top_k)
                     answer, conf = self.llm_service.generate_answer(question, chunks)
                     elapsed = (time.time() - start) * 1000
                     st.markdown(answer)
