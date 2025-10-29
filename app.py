@@ -16,7 +16,7 @@ from groq import Groq
 # =============================================================================
 class Config:
     EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
-    GROQ_MODEL = "llama-3.1-70b-versatile"  # Using Groq's fast LLM
+    GROQ_MODEL = "llama-3.3-70b-versatile"  # Updated to current model
     TOP_K_CHUNKS = 3
     CHUNK_SIZE = 500
     MIN_PARAGRAPH_LENGTH = 20
@@ -152,7 +152,7 @@ class DocumentProcessor:
         return results
 
 # =============================================================================
-# GROQ LLM SERVICE - Now with actual AI analysis!
+# GROQ LLM SERVICE - Fixed with current models
 # =============================================================================
 class LLMService:
     def __init__(self):
@@ -190,22 +190,23 @@ class LLMService:
             messages = [
                 {
                     "role": "system",
-                    "content": """You are an expert document analyst. Based on the provided document context, provide:
-1. A direct, concise answer to the question
-2. Key supporting evidence from the document
-3. Page references for important facts
-4. Clear analysis and insights
+                    "content": """You are an expert document analyst. Based EXCLUSIVELY on the provided document context, provide:
 
-Keep your response structured but natural. Focus on accuracy and clarity."""
+1. A direct, concise answer to the question
+2. Key evidence and quotes from the document to support your answer
+3. Specific page numbers where information was found
+4. Clear analysis connecting the evidence to the answer
+
+IMPORTANT: Only use information from the provided document. If the answer isn't in the document, say so clearly."""
                 },
                 {
                     "role": "user", 
                     "content": f"""DOCUMENT CONTEXT:
 {context}
 
-QUESTION: {question}
+USER QUESTION: {question}
 
-Please analyze the document and provide a comprehensive answer with specific page references."""
+Based ONLY on the document context above, please provide a comprehensive answer with specific evidence and page references."""
                 }
             ]
             
@@ -213,7 +214,7 @@ Please analyze the document and provide a comprehensive answer with specific pag
             response = self.client.chat.completions.create(
                 model=Config.GROQ_MODEL,
                 messages=messages,
-                temperature=0.3,
+                temperature=0.1,  # Lower temperature for more factual responses
                 max_tokens=1024,
                 top_p=0.9
             )
@@ -231,31 +232,97 @@ Please analyze the document and provide a comprehensive answer with specific pag
             
         except Exception as e:
             st.error(f"❌ LLM analysis failed: {e}")
-            return self._simple_answer(question, chunks, avg_conf)
+            # Try alternative models if the first one fails
+            return self._try_alternative_models(question, chunks, avg_conf)
+
+    def _try_alternative_models(self, question, chunks, avg_conf):
+        """Try alternative Groq models if the primary one fails"""
+        alternative_models = [
+            "llama-3.1-8b-instant",  # Fast alternative
+            "mixtral-8x7b-32768",    # High quality alternative
+            "llama-3.2-1b-preview"   # Lightweight alternative
+        ]
+        
+        for model in alternative_models:
+            try:
+                st.info(f"🔄 Trying alternative model: {model}")
+                context = "\n\n".join([
+                    f"From Page {c['metadata']['page']}: {c['content']}" 
+                    for c in chunks
+                ])
+                
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful AI assistant that answers questions based on the provided document context. Provide accurate answers with page references."
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"Context: {context}\n\nQuestion: {question}\n\nAnswer based on the context:"
+                    }
+                ]
+                
+                response = self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=800
+                )
+                
+                ai_answer = response.choices[0].message.content
+                answer = f"**🤔 Question:** {question}\n\n"
+                answer += f"**💡 AI Analysis:**\n{ai_answer}\n\n"
+                answer += f"**📚 Source References:**\n"
+                for c in chunks:
+                    answer += f"• Page {c['metadata']['page']} (Relevance: {c['similarity']:.1%})\n"
+                
+                st.success(f"✅ Using model: {model}")
+                return answer, avg_conf
+                
+            except Exception as e:
+                continue
+        
+        # If all models fail, use simple method
+        st.error("❌ All LLM models failed, using basic analysis")
+        return self._simple_answer(question, chunks, avg_conf)
 
     def _simple_answer(self, question, chunks, avg_conf):
         """Fallback method without LLM"""
-        summary = self._summarize(chunks)
-        answer = f"**Question:** {question}\n\n**Answer:**\n{summary}\n\n**Sources:**\n"
-        for i, c in enumerate(chunks):
+        # Extract key sentences and create a better summary
+        key_sentences = []
+        for chunk in chunks:
+            sentences = [s.strip() for s in chunk['content'].split('.') if s.strip()]
+            # Take first 2 sentences from each relevant chunk
+            key_sentences.extend(sentences[:2])
+        
+        # Remove duplicates and create summary
+        unique_sentences = []
+        for sentence in key_sentences:
+            if sentence not in unique_sentences and len(sentence) > 20:
+                unique_sentences.append(sentence)
+        
+        summary = "\n".join([f"• {sentence}." for sentence in unique_sentences[:6]])
+        
+        answer = f"**🤔 Question:** {question}\n\n"
+        answer += f"**📊 Document Summary:**\n{summary}\n\n"
+        answer += f"**📚 Sources:**\n"
+        for c in chunks:
             answer += f"• Page {c['metadata']['page']} | Confidence: {c['similarity']:.1%}\n"
+        
         return answer, avg_conf
-
-    def _summarize(self, chunks):
-        all_text = " ".join([c['content'] for c in chunks])
-        sentences = [s.strip() for s in all_text.split(".") if len(s.strip()) > 20]
-        summary = "\n".join([f"• {s}." for s in sentences[:5]])
-        return summary
 
 # =============================================================================
 # VOICE SERVICE
 # =============================================================================
 class VoiceService:
     def speak_text(self, text):
-        tts = gTTS(text)
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        tts.save(tmp_file.name)
-        st.audio(tmp_file.name, format="audio/mp3")
+        try:
+            tts = gTTS(text)
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+            tts.save(tmp_file.name)
+            st.audio(tmp_file.name, format="audio/mp3")
+        except Exception as e:
+            st.error(f"❌ Voice generation failed: {e}")
 
 # =============================================================================
 # STREAMLIT APP
