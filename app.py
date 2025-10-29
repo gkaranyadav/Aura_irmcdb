@@ -1,4 +1,3 @@
-# app.py - Aura PDF QA ⚡
 import streamlit as st
 import tempfile, os, uuid, time
 from PyPDF2 import PdfReader
@@ -168,71 +167,47 @@ class VoiceService:
 # =============================================================================
 class AuraPDFQAApp:
     def __init__(self):
-        # Initialize session state FIRST
-        if 'pdf_processed' not in st.session_state:
-            st.session_state.pdf_processed = False
-        if 'messages' not in st.session_state:
-            st.session_state.messages = []
-            
         self.doc_processor = DocumentProcessor()
         self.llm_service = LLMService()
         self.voice_service = VoiceService()
         self.setup_ui()
 
     def setup_ui(self):
-        st.set_page_config(page_title="Aura PDF QA ⚡", layout="wide")
+        st.set_page_config(page_title="IRMC AskPro ⚡", layout="wide")
 
     def render_sidebar(self):
-        st.sidebar.title("📚 Aura PDF QA")
+        st.sidebar.title("📚 IRMC AskPro")
         uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
-        
-        # Show current status
-        if st.session_state.pdf_processed:
-            st.sidebar.success("✅ PDF is ready for questions!")
-        else:
-            st.sidebar.warning("⚠️ Upload and process a PDF to start")
-        
-        if uploaded_file:
-            st.sidebar.write(f"**File:** {uploaded_file.name}")
-            if st.sidebar.button("🚀 Process Document", type="primary"):
-                with st.spinner("Processing PDF..."):
-                    count = self.doc_processor.process_pdf(uploaded_file)
-                    if count > 0:
-                        st.session_state.pdf_processed = True
-                        st.session_state.pdf_name = uploaded_file.name
-                        st.sidebar.success(f"✅ PDF processed with {count} chunks!")
-                    else:
-                        st.session_state.pdf_processed = False
-        
+        if uploaded_file and st.sidebar.button("Process Document"):
+            count = self.doc_processor.process_pdf(uploaded_file)
+            if count > 0:
+                st.session_state.pdf_processed = True
+                st.session_state.pdf_name = uploaded_file.name
+                st.success(f"PDF processed with {count} chunks.")
         top_k = st.sidebar.slider("Sources to retrieve", 1, 5, 3)
         enable_voice = st.sidebar.checkbox("Enable Voice", True)
         return top_k, enable_voice
 
     def render_chat(self, top_k, enable_voice):
-        st.title("Aura PDF QA ⚡")
+        st.title("IRMC AskPro ⚡")
         st.markdown("Ask questions about your document and get AI-powered answers")
-        
-        # Show processing status clearly
-        if not st.session_state.pdf_processed:
-            st.error("❌ Please upload a PDF and click 'Process Document' first!")
-            st.info("📝 Steps to use:")
-            st.write("1. Upload PDF in sidebar")
-            st.write("2. Click 'Process Document' button")  
-            st.write("3. Wait for processing to complete")
-            st.write("4. Start asking questions!")
-            return
+        if 'messages' not in st.session_state:
+            st.session_state.messages = []
+        if 'pdf_processed' not in st.session_state:
+            st.session_state.pdf_processed = False
 
-        # Display chat messages
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # Chat input
-        question = st.chat_input("Ask a question about your document...")
+        question = st.chat_input("Ask a question...")
         if question:
+            if not st.session_state.pdf_processed:
+                st.error("Upload and process a PDF first!")
+                return
             st.session_state.messages.append({"role": "user", "content": question})
             with st.chat_message("assistant"):
-                with st.spinner("Searching for answers..."):
+                with st.spinner("Searching..."):
                     start = time.time()
                     chunks = self.doc_processor.search_similar(question, top_k)
                     answer, conf = self.llm_service.generate_answer(question, chunks)
