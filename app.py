@@ -76,7 +76,7 @@ class DocumentProcessor:
         pdf_path = tmp_file.name
 
         try:
-            st.info("Processing PDF...")  # Short message
+            st.info("Knowledge at your command!")  # Short message
             pdf_type = self.analyze_pdf_type(pdf_path)
             if pdf_type == "text_based":
                 extracted = self.extract_text_direct(pdf_path)
