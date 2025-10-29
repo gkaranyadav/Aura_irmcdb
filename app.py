@@ -248,7 +248,10 @@ class AuraPDFQAApp:
 
     # Main chat
     def render_chat(self, top_k, enable_voice):
-        st.title("IRMC Aura 📚")  # Only one main heading
+        st.title("IRMC Aura 📚")
+        st.centered-title {
+        text-align: center;
+    }# Only one main heading
         if not st.session_state.pdf_processed:
             st.error("❌ Upload PDF and click Process first!")
             return
