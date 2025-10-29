@@ -9,12 +9,14 @@ import pytesseract
 from PIL import Image
 import pdf2image
 from gtts import gTTS
+from groq import Groq
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 class Config:
     EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
+    GROQ_MODEL = "llama-3.1-70b-versatile"  # Using Groq's fast LLM
     TOP_K_CHUNKS = 3
     CHUNK_SIZE = 500
     MIN_PARAGRAPH_LENGTH = 20
@@ -150,17 +152,93 @@ class DocumentProcessor:
         return results
 
 # =============================================================================
-# LLM SERVICE
+# GROQ LLM SERVICE - Now with actual AI analysis!
 # =============================================================================
 class LLMService:
+    def __init__(self):
+        try:
+            # Initialize Groq client
+            self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            st.sidebar.success("✅ Groq LLM connected")
+        except Exception as e:
+            st.error(f"❌ Groq initialization failed: {e}")
+            self.client = None
+
     def generate_answer(self, question, chunks):
         if not chunks:
             return f"❌ No relevant info found for '{question}'", 0.0
+        
         avg_conf = sum(c["similarity"] for c in chunks)/len(chunks)
+        
+        # If Groq is available, use it for intelligent analysis
+        if self.client:
+            return self._generate_llm_answer(question, chunks, avg_conf)
+        else:
+            # Fallback to simple summary
+            return self._simple_answer(question, chunks, avg_conf)
+
+    def _generate_llm_answer(self, question, chunks, avg_conf):
+        """Use Groq LLM to analyze and provide intelligent answers"""
+        try:
+            # Prepare context from relevant chunks
+            context = "\n\n".join([
+                f"From Page {c['metadata']['page']}: {c['content']}" 
+                for c in chunks
+            ])
+            
+            # Create intelligent prompt for analysis
+            messages = [
+                {
+                    "role": "system",
+                    "content": """You are an expert document analyst. Based on the provided document context, provide:
+1. A direct, concise answer to the question
+2. Key supporting evidence from the document
+3. Page references for important facts
+4. Clear analysis and insights
+
+Keep your response structured but natural. Focus on accuracy and clarity."""
+                },
+                {
+                    "role": "user", 
+                    "content": f"""DOCUMENT CONTEXT:
+{context}
+
+QUESTION: {question}
+
+Please analyze the document and provide a comprehensive answer with specific page references."""
+                }
+            ]
+            
+            # Get response from Groq
+            response = self.client.chat.completions.create(
+                model=Config.GROQ_MODEL,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=1024,
+                top_p=0.9
+            )
+            
+            ai_answer = response.choices[0].message.content
+            
+            # Format the final answer
+            answer = f"**🤔 Question:** {question}\n\n"
+            answer += f"**💡 AI Analysis:**\n{ai_answer}\n\n"
+            answer += f"**📚 Source References:**\n"
+            for c in chunks:
+                answer += f"• Page {c['metadata']['page']} (Relevance: {c['similarity']:.1%})\n"
+            
+            return answer, avg_conf
+            
+        except Exception as e:
+            st.error(f"❌ LLM analysis failed: {e}")
+            return self._simple_answer(question, chunks, avg_conf)
+
+    def _simple_answer(self, question, chunks, avg_conf):
+        """Fallback method without LLM"""
         summary = self._summarize(chunks)
         answer = f"**Question:** {question}\n\n**Answer:**\n{summary}\n\n**Sources:**\n"
         for i, c in enumerate(chunks):
-            answer += f"Page {c['metadata']['page']} | Confidence: {c['similarity']:.1%}\n{c['content'][:200]}...\n\n"
+            answer += f"• Page {c['metadata']['page']} | Confidence: {c['similarity']:.1%}\n"
         return answer, avg_conf
 
     def _summarize(self, chunks):
@@ -201,6 +279,14 @@ class AuraPDFQAApp:
 
     def render_sidebar(self):
         st.sidebar.title("📚 Aura PDF QA")
+        
+        # Groq status
+        if hasattr(self.llm_service, 'client') and self.llm_service.client:
+            st.sidebar.success("🦙 Groq LLM: Connected")
+        else:
+            st.sidebar.warning("🦙 Groq LLM: Not connected")
+            st.sidebar.info("Add GROQ_API_KEY to Streamlit secrets")
+        
         uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
         
         # Show current status
@@ -251,7 +337,7 @@ class AuraPDFQAApp:
         if question:
             st.session_state.messages.append({"role": "user", "content": question})
             with st.chat_message("assistant"):
-                with st.spinner("Searching for answers..."):
+                with st.spinner("🔍 Analyzing document with AI..."):
                     start = time.time()
                     chunks = st.session_state.doc_processor.search_similar(question, top_k)
                     answer, conf = self.llm_service.generate_answer(question, chunks)
