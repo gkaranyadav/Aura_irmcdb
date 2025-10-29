@@ -1,4 +1,4 @@
-# app.py - Aura PDF QA ⚡ (Improved)
+# app.py - Aura PDF QA ⚡
 import streamlit as st
 import tempfile, os, time
 from PyPDF2 import PdfReader
@@ -17,8 +17,8 @@ class Config:
     EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
     GROQ_MODEL = "llama-3.3-70b-versatile"
     TOP_K_CHUNKS = 3
-    CHUNK_SIZE = 300       # smaller chunks for better relevance
-    MIN_PARAGRAPH_LENGTH = 10
+    CHUNK_SIZE = 500
+    MIN_PARAGRAPH_LENGTH = 20
 
 # =============================================================================
 # DOCUMENT PROCESSOR
@@ -78,7 +78,6 @@ class DocumentProcessor:
             pdf_type = self.analyze_pdf_type(pdf_path)
             st.info(f"PDF type detected: {pdf_type}")
 
-            # Extract text
             if pdf_type == "text_based":
                 extracted = self.extract_text_direct(pdf_path)
                 method = "text"
@@ -88,32 +87,38 @@ class DocumentProcessor:
                 method = "ocr"
                 st.info(f"📷 OCR processed {len(extracted)} pages")
 
-            # ---------------- Improved chunking ----------------
+            # Chunking
             for item in extracted:
                 page = item["page"]
-                lines = [l.strip() for l in item["text"].split("\n") if l.strip()]
-                chunk = ""
-                for line in lines:
-                    if len(chunk + " " + line) <= Config.CHUNK_SIZE:
-                        chunk += " " + line
-                    else:
+                paragraphs = [p.strip() for p in item["text"].split("\n\n") if len(p.strip()) >= Config.MIN_PARAGRAPH_LENGTH]
+                for para in paragraphs:
+                    if len(para) > Config.CHUNK_SIZE:
+                        sentences = para.split(". ")
+                        chunk = ""
+                        for s in sentences:
+                            if len(chunk + s) < Config.CHUNK_SIZE:
+                                chunk += s + ". "
+                            else:
+                                if chunk.strip():
+                                    self.chunks.append(chunk.strip())
+                                    self.chunk_metadata.append({"page": page, "method": method})
+                                chunk = s + ". "
                         if chunk.strip():
                             self.chunks.append(chunk.strip())
                             self.chunk_metadata.append({"page": page, "method": method})
-                        chunk = line
-                if chunk.strip():
-                    self.chunks.append(chunk.strip())
-                    self.chunk_metadata.append({"page": page, "method": method})
+                    else:
+                        if para.strip():
+                            self.chunks.append(para)
+                            self.chunk_metadata.append({"page": page, "method": method})
 
             st.info(f"📊 Created {len(self.chunks)} text chunks")
-
             if not self.chunks:
                 st.error("❌ No text extracted from PDF.")
                 return 0
 
             # Embeddings + FAISS
             st.info("🧠 Creating embeddings...")
-            embeddings = self.embedder.encode(self.chunks, convert_to_numpy=True)
+            embeddings = self.embedder.encode(self.chunks)
             self.index = faiss.IndexFlatL2(embeddings.shape[1])
             self.index.add(np.array(embeddings))
             st.success(f"✅ PDF processed: {len(self.chunks)} chunks created")
@@ -131,7 +136,7 @@ class DocumentProcessor:
             st.warning("⚠️ No document processed yet")
             return []
 
-        query_vec = self.embedder.encode([query], convert_to_numpy=True)
+        query_vec = self.embedder.encode([query])
         distances, indices = self.index.search(np.array(query_vec), top_k)
         results = []
         for i, idx in enumerate(indices[0]):
@@ -156,6 +161,7 @@ class LLMService:
     def generate_answer(self, question, chunks):
         if not chunks:
             return f"❌ No relevant info found for '{question}'", 0.0
+
         avg_conf = sum(c["similarity"] for c in chunks)/len(chunks)
         if self.client:
             return self._generate_llm_answer(question, chunks, avg_conf)
@@ -166,14 +172,14 @@ class LLMService:
         try:
             context = "\n\n".join([f"Page {c['metadata']['page']}: {c['content']}" for c in chunks])
             messages = [
-                {"role": "system",
-                 "content": (
-                     "You are a document expert. Answer questions ONLY using the provided context. "
-                     "Provide direct answers, supporting quotes, and page numbers. "
-                     "Do NOT hallucinate information."
-                 )},
-                {"role": "user",
-                 "content": f"CONTEXT:\n{context}\n\nQUESTION: {question}\n\nAnswer with evidence and pages."}
+                {
+                    "role": "system",
+                    "content": "You are an expert AI assistant. Answer ONLY based on the provided document context with evidence, page numbers, and concise explanation."
+                },
+                {
+                    "role": "user",
+                    "content": f"DOCUMENT CONTEXT:\n{context}\n\nQUESTION: {question}"
+                }
             ]
             response = self.client.chat.completions.create(
                 model=Config.GROQ_MODEL,
@@ -193,15 +199,15 @@ class LLMService:
 
     def _simple_answer(self, question, chunks, avg_conf):
         key_sentences = []
-        for c in chunks:
-            sentences = [s.strip() for s in c['content'].split('.') if s.strip()]
-            key_sentences.extend(sentences[:2])
-        unique_sentences = []
+        for chunk in chunks:
+            sents = [s.strip() for s in chunk['content'].split('.') if s.strip()]
+            key_sentences.extend(sents[:2])
+        unique_sents = []
         for s in key_sentences:
-            if s not in unique_sentences and len(s) > 15:
-                unique_sentences.append(s)
-        summary = "\n".join([f"• {s}." for s in unique_sentences[:6]])
-        answer = f"**🤔 Question:** {question}\n\n**📊 Summary:**\n{summary}\n\n**📚 Sources:**\n"
+            if s not in unique_sents and len(s) > 20:
+                unique_sents.append(s)
+        summary = "\n".join([f"• {s}." for s in unique_sents[:6]])
+        answer = f"**🤔 Question:** {question}\n\n**📊 Document Summary:**\n{summary}\n\n**📚 Sources:**\n"
         for c in chunks:
             answer += f"• Page {c['metadata']['page']} | Confidence: {c['similarity']:.1%}\n"
         return answer, avg_conf
@@ -217,7 +223,7 @@ class VoiceService:
             tts.save(tmp_file.name)
             st.audio(tmp_file.name, format="audio/mp3")
         except Exception as e:
-            st.error(f"❌ Voice failed: {e}")
+            st.error(f"❌ Voice generation failed: {e}")
 
 # =============================================================================
 # STREAMLIT APP
@@ -230,8 +236,12 @@ class AuraPDFQAApp:
             st.session_state.messages = []
         if 'doc_processor' not in st.session_state:
             st.session_state.doc_processor = DocumentProcessor()
+
         self.llm_service = LLMService()
         self.voice_service = VoiceService()
+        self.setup_ui()
+
+    def setup_ui(self):
         st.set_page_config(page_title="Aura PDF QA ⚡", layout="wide")
 
     def render_sidebar(self):
@@ -241,43 +251,47 @@ class AuraPDFQAApp:
         else:
             st.sidebar.warning("🦙 Groq LLM: Not connected")
             st.sidebar.info("Add GROQ_API_KEY to Streamlit secrets")
+
         uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
         if st.session_state.pdf_processed:
-            st.sidebar.success("✅ PDF ready!")
+            st.sidebar.success("✅ PDF ready for questions")
         else:
-            st.sidebar.warning("⚠️ Upload PDF to start")
+            st.sidebar.warning("⚠️ Upload a PDF first")
+
         if uploaded_file:
             st.sidebar.write(f"**File:** {uploaded_file.name}")
-            if st.sidebar.button("🚀 Process Document", type="primary", use_container_width=True):
-                with st.spinner("Processing PDF..."):
-                    count = st.session_state.doc_processor.process_pdf(uploaded_file)
-                    if count > 0:
-                        st.session_state.pdf_processed = True
-                        st.session_state.pdf_name = uploaded_file.name
-                        st.sidebar.success(f"✅ PDF processed ({count} chunks)")
-                        st.experimental_rerun()
-                    else:
-                        st.session_state.pdf_processed = False
-                        st.sidebar.error("❌ Failed to process PDF")
-        top_k = st.sidebar.slider("Sources to retrieve", 1, 5, Config.TOP_K_CHUNKS)
-        enable_voice = st.sidebar.checkbox("Enable Voice Output", True)
+            if st.sidebar.button("🚀 Process Document"):
+                count = st.session_state.doc_processor.process_pdf(uploaded_file)
+                if count > 0:
+                    st.session_state.pdf_processed = True
+                    st.session_state.pdf_name = uploaded_file.name
+                    st.sidebar.success(f"✅ PDF processed ({count} chunks)")
+                else:
+                    st.session_state.pdf_processed = False
+                    st.sidebar.error("❌ Failed to process PDF")
+
+        top_k = st.sidebar.slider("Sources to retrieve", 1, 5, 3)
+        enable_voice = st.sidebar.checkbox("Enable Voice", True)
         return top_k, enable_voice
 
     def render_chat(self, top_k, enable_voice):
         st.title("Aura PDF QA ⚡")
-        st.markdown("Ask questions about your PDF document and get AI-powered answers.")
+        st.markdown("Ask questions about your document and get AI-powered answers")
+
         if not st.session_state.pdf_processed:
-            st.error("❌ Upload and process a PDF first!")
-            st.info("Steps:\n1️⃣ Upload PDF\n2️⃣ Process Document\n3️⃣ Ask Questions")
+            st.error("❌ Please upload and process a PDF first!")
+            st.info("Steps:\n1. Upload PDF\n2. Click 'Process Document'\n3. Wait\n4. Ask questions")
             return
+
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+
         question = st.chat_input("Ask a question about your document...")
         if question:
             st.session_state.messages.append({"role": "user", "content": question})
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Analyzing..."):
+                with st.spinner("🔍 Analyzing document..."):
                     start = time.time()
                     chunks = st.session_state.doc_processor.search_similar(question, top_k)
                     answer, conf = self.llm_service.generate_answer(question, chunks)
