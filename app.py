@@ -1,23 +1,23 @@
-# app.py - Aura PDF QA ⚡
+# app.py - Aura PDF QA ⚡ with Voice Input & Auto TTS
 import streamlit as st
-import tempfile, os, uuid, time
+import tempfile, os, time
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 import pytesseract
-from PIL import Image
 import pdf2image
 from gtts import gTTS
 from groq import Groq
+import speech_recognition as sr
+from pydub import AudioSegment
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 class Config:
     EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
-    GROQ_MODEL = "llama-3.3-70b-versatile"  # Updated to current model
-    TOP_K_CHUNKS = 3
+    GROQ_MODEL = "llama-3.3-70b-versatile"
     CHUNK_SIZE = 500
     MIN_PARAGRAPH_LENGTH = 20
 
@@ -65,7 +65,6 @@ class DocumentProcessor:
         return "text_based" if total_pages == 0 or text_pages / total_pages > 0.5 else "scanned"
 
     def process_pdf(self, uploaded_file):
-        # Clear previous data
         self.chunks = []
         self.chunk_metadata = []
         self.index = None
@@ -80,7 +79,6 @@ class DocumentProcessor:
             pdf_type = self.analyze_pdf_type(pdf_path)
             st.info(f"PDF type detected: {pdf_type}")
 
-            # Extract text
             if pdf_type == "text_based":
                 extracted = self.extract_text_direct(pdf_path)
                 method = "text"
@@ -91,7 +89,6 @@ class DocumentProcessor:
                 st.info(f"📷 OCR processed {len(extracted)} pages")
 
             # Chunking
-            self.chunks, self.chunk_metadata = [], []
             for item in extracted:
                 page = item["page"]
                 paragraphs = [p.strip() for p in item["text"].split("\n\n") if len(p.strip()) >= Config.MIN_PARAGRAPH_LENGTH]
@@ -116,19 +113,16 @@ class DocumentProcessor:
                             self.chunk_metadata.append({"page": page, "method": method})
 
             st.info(f"📊 Created {len(self.chunks)} text chunks")
-
             if not self.chunks:
                 st.error("❌ No text extracted from PDF.")
                 return 0
 
-            # Embeddings + FAISS
             st.info("🧠 Creating embeddings...")
             embeddings = self.embedder.encode(self.chunks)
             self.index = faiss.IndexFlatL2(embeddings.shape[1])
             self.index.add(np.array(embeddings))
             st.success(f"✅ PDF processed: {len(self.chunks)} chunks created")
             return len(self.chunks)
-
         except Exception as e:
             st.error(f"❌ Processing failed: {str(e)}")
             return 0
@@ -152,12 +146,11 @@ class DocumentProcessor:
         return results
 
 # =============================================================================
-# GROQ LLM SERVICE - Fixed with current models
+# LLM SERVICE
 # =============================================================================
 class LLMService:
     def __init__(self):
         try:
-            # Initialize Groq client
             self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
             st.sidebar.success("✅ Groq LLM connected")
         except Exception as e:
@@ -169,248 +162,128 @@ class LLMService:
             return f"❌ No relevant info found for '{question}'", 0.0
         
         avg_conf = sum(c["similarity"] for c in chunks)/len(chunks)
-        
-        # If Groq is available, use it for intelligent analysis
         if self.client:
             return self._generate_llm_answer(question, chunks, avg_conf)
         else:
-            # Fallback to simple summary
             return self._simple_answer(question, chunks, avg_conf)
 
     def _generate_llm_answer(self, question, chunks, avg_conf):
-        """Use Groq LLM to analyze and provide intelligent answers"""
+        context = "\n\n".join([f"Page {c['metadata']['page']}: {c['content']}" for c in chunks])
+        messages = [
+            {"role": "system", "content": "You are an expert document analyst. Answer ONLY using the provided context."},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+        ]
         try:
-            # Prepare context from relevant chunks
-            context = "\n\n".join([
-                f"From Page {c['metadata']['page']}: {c['content']}" 
-                for c in chunks
-            ])
-            
-            # Create intelligent prompt for analysis
-            messages = [
-                {
-                    "role": "system",
-                    "content": """You are an expert document analyst. Based EXCLUSIVELY on the provided document context, provide:
-
-1. A direct, concise answer to the question
-2. Key evidence and quotes from the document to support your answer
-3. Specific page numbers where information was found
-4. Clear analysis connecting the evidence to the answer
-
-IMPORTANT: Only use information from the provided document. If the answer isn't in the document, say so clearly."""
-                },
-                {
-                    "role": "user", 
-                    "content": f"""DOCUMENT CONTEXT:
-{context}
-
-USER QUESTION: {question}
-
-Based ONLY on the document context above, please provide a comprehensive answer with specific evidence and page references."""
-                }
-            ]
-            
-            # Get response from Groq
             response = self.client.chat.completions.create(
                 model=Config.GROQ_MODEL,
                 messages=messages,
-                temperature=0.1,  # Lower temperature for more factual responses
-                max_tokens=1024,
-                top_p=0.9
+                temperature=0.1,
+                max_tokens=1024
             )
-            
             ai_answer = response.choices[0].message.content
-            
-            # Format the final answer
-            answer = f"**🤔 Question:** {question}\n\n"
-            answer += f"**💡 AI Analysis:**\n{ai_answer}\n\n"
-            answer += f"**📚 Source References:**\n"
+            answer = f"**🤔 Question:** {question}\n\n**💡 AI Analysis:**\n{ai_answer}\n\n**📚 Sources:**\n"
             for c in chunks:
                 answer += f"• Page {c['metadata']['page']} (Relevance: {c['similarity']:.1%})\n"
-            
             return answer, avg_conf
-            
-        except Exception as e:
-            st.error(f"❌ LLM analysis failed: {e}")
-            # Try alternative models if the first one fails
-            return self._try_alternative_models(question, chunks, avg_conf)
-
-    def _try_alternative_models(self, question, chunks, avg_conf):
-        """Try alternative Groq models if the primary one fails"""
-        alternative_models = [
-            "llama-3.1-8b-instant",  # Fast alternative
-            "mixtral-8x7b-32768",    # High quality alternative
-            "llama-3.2-1b-preview"   # Lightweight alternative
-        ]
-        
-        for model in alternative_models:
-            try:
-                st.info(f"🔄 Trying alternative model: {model}")
-                context = "\n\n".join([
-                    f"From Page {c['metadata']['page']}: {c['content']}" 
-                    for c in chunks
-                ])
-                
-                messages = [
-                    {
-                        "role": "system",
-                        "content": "You are a helpful AI assistant that answers questions based on the provided document context. Provide accurate answers with page references."
-                    },
-                    {
-                        "role": "user", 
-                        "content": f"Context: {context}\n\nQuestion: {question}\n\nAnswer based on the context:"
-                    }
-                ]
-                
-                response = self.client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=0.1,
-                    max_tokens=800
-                )
-                
-                ai_answer = response.choices[0].message.content
-                answer = f"**🤔 Question:** {question}\n\n"
-                answer += f"**💡 AI Analysis:**\n{ai_answer}\n\n"
-                answer += f"**📚 Source References:**\n"
-                for c in chunks:
-                    answer += f"• Page {c['metadata']['page']} (Relevance: {c['similarity']:.1%})\n"
-                
-                st.success(f"✅ Using model: {model}")
-                return answer, avg_conf
-                
-            except Exception as e:
-                continue
-        
-        # If all models fail, use simple method
-        st.error("❌ All LLM models failed, using basic analysis")
-        return self._simple_answer(question, chunks, avg_conf)
+        except:
+            return self._simple_answer(question, chunks, avg_conf)
 
     def _simple_answer(self, question, chunks, avg_conf):
-        """Fallback method without LLM"""
-        # Extract key sentences and create a better summary
-        key_sentences = []
-        for chunk in chunks:
-            sentences = [s.strip() for s in chunk['content'].split('.') if s.strip()]
-            # Take first 2 sentences from each relevant chunk
-            key_sentences.extend(sentences[:2])
-        
-        # Remove duplicates and create summary
-        unique_sentences = []
-        for sentence in key_sentences:
-            if sentence not in unique_sentences and len(sentence) > 20:
-                unique_sentences.append(sentence)
-        
-        summary = "\n".join([f"• {sentence}." for sentence in unique_sentences[:6]])
-        
-        answer = f"**🤔 Question:** {question}\n\n"
-        answer += f"**📊 Document Summary:**\n{summary}\n\n"
-        answer += f"**📚 Sources:**\n"
+        sentences = []
+        for c in chunks:
+            sents = [s.strip() for s in c["content"].split(".") if len(s.strip()) > 20]
+            sentences.extend(sents[:2])
+        summary = "\n".join([f"• {s}." for s in sentences[:6]])
+        answer = f"**🤔 Question:** {question}\n\n**📊 Document Summary:**\n{summary}\n\n**📚 Sources:**\n"
         for c in chunks:
             answer += f"• Page {c['metadata']['page']} | Confidence: {c['similarity']:.1%}\n"
-        
         return answer, avg_conf
 
 # =============================================================================
 # VOICE SERVICE
 # =============================================================================
 class VoiceService:
+    def __init__(self):
+        self.recognizer = sr.Recognizer()
+
     def speak_text(self, text):
-        try:
-            tts = gTTS(text)
-            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-            tts.save(tmp_file.name)
-            st.audio(tmp_file.name, format="audio/mp3")
-        except Exception as e:
-            st.error(f"❌ Voice generation failed: {e}")
+        """Clean special symbols before TTS"""
+        clean_text = text.replace("**", "").replace("📚", "").replace("💡", "")
+        tts = gTTS(clean_text)
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tts.save(tmp_file.name)
+        st.audio(tmp_file.name, format="audio/mp3", start_time=0)
+        os.unlink(tmp_file.name)
+
+    def listen(self):
+        st.info("🎤 Upload an audio file or record your question")
+        audio_file = st.file_uploader("Upload audio (.wav or .mp3)", type=["wav","mp3"])
+        if audio_file:
+            audio = AudioSegment.from_file(audio_file)
+            wav_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            audio.export(wav_file.name, format="wav")
+            with sr.AudioFile(wav_file.name) as source:
+                audio_data = self.recognizer.record(source)
+                try:
+                    text = self.recognizer.recognize_google(audio_data)
+                    return text
+                except sr.UnknownValueError:
+                    st.error("❌ Could not understand audio")
+                except sr.RequestError:
+                    st.error("❌ Speech recognition service error")
+        return None
 
 # =============================================================================
 # STREAMLIT APP
 # =============================================================================
 class AuraPDFQAApp:
     def __init__(self):
-        # Initialize session state
         if 'pdf_processed' not in st.session_state:
             st.session_state.pdf_processed = False
         if 'messages' not in st.session_state:
             st.session_state.messages = []
         if 'doc_processor' not in st.session_state:
             st.session_state.doc_processor = DocumentProcessor()
-            
         self.llm_service = LLMService()
         self.voice_service = VoiceService()
-        self.setup_ui()
-
-    def setup_ui(self):
         st.set_page_config(page_title="Aura PDF QA ⚡", layout="wide")
+        self.run()
 
     def render_sidebar(self):
         st.sidebar.title("📚 Aura PDF QA")
-        
-        # Groq status
-        if hasattr(self.llm_service, 'client') and self.llm_service.client:
-            st.sidebar.success("🦙 Groq LLM: Connected")
-        else:
-            st.sidebar.warning("🦙 Groq LLM: Not connected")
-            st.sidebar.info("Add GROQ_API_KEY to Streamlit secrets")
-        
         uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
-        
-        # Show current status
-        if st.session_state.pdf_processed:
-            st.sidebar.success("✅ PDF is ready for questions!")
-        else:
-            st.sidebar.warning("⚠️ Upload and process a PDF to start")
-        
-        if uploaded_file:
-            st.sidebar.write(f"**File:** {uploaded_file.name}")
-            if st.sidebar.button("🚀 Process Document", type="primary", use_container_width=True):
-                with st.spinner("Processing PDF... This may take a few seconds"):
-                    count = st.session_state.doc_processor.process_pdf(uploaded_file)
-                    if count > 0:
-                        st.session_state.pdf_processed = True
-                        st.session_state.pdf_name = uploaded_file.name
-                        st.sidebar.success(f"✅ PDF processed with {count} chunks!")
-                        st.rerun()
-                    else:
-                        st.session_state.pdf_processed = False
-                        st.sidebar.error("❌ Failed to process PDF")
-        
+        if uploaded_file and st.sidebar.button("🚀 Process Document"):
+            count = st.session_state.doc_processor.process_pdf(uploaded_file)
+            if count > 0:
+                st.session_state.pdf_processed = True
+                st.session_state.pdf_name = uploaded_file.name
+                st.sidebar.success(f"✅ PDF processed with {count} chunks!")
         top_k = st.sidebar.slider("Sources to retrieve", 1, 5, 3)
-        enable_voice = st.sidebar.checkbox("Enable Voice", True)
+        enable_voice = st.sidebar.checkbox("Enable Voice Output", True)
         return top_k, enable_voice
 
     def render_chat(self, top_k, enable_voice):
         st.title("Aura PDF QA ⚡")
-        st.markdown("Ask questions about your document and get AI-powered answers")
-        
-        # Show processing status clearly
         if not st.session_state.pdf_processed:
-            st.error("❌ Please upload a PDF and click 'Process Document' first!")
-            st.info("📝 Steps to use:")
-            st.write("1. Upload PDF in sidebar")
-            st.write("2. Click 'Process Document' button")  
-            st.write("3. Wait for processing to complete")
-            st.write("4. Start asking questions!")
+            st.info("Upload a PDF and process first to start asking questions.")
             return
 
-        # Display chat messages
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # Chat input
-        question = st.chat_input("Ask a question about your document...")
+        question_text = st.chat_input("Ask a question or use voice input")
+        voice_question = self.voice_service.listen()
+        question = question_text or voice_question
+
         if question:
             st.session_state.messages.append({"role": "user", "content": question})
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Analyzing document with AI..."):
-                    start = time.time()
+                with st.spinner("🔍 Analyzing document..."):
                     chunks = st.session_state.doc_processor.search_similar(question, top_k)
                     answer, conf = self.llm_service.generate_answer(question, chunks)
-                    elapsed = (time.time() - start) * 1000
                     st.markdown(answer)
-                    st.caption(f"⏱️ {elapsed:.0f}ms | Confidence: {conf:.1%}")
+                    st.caption(f"⏱️ Confidence: {conf:.1%}")
                     if enable_voice and conf > 0.1:
                         self.voice_service.speak_text(answer)
             st.session_state.messages.append({"role": "assistant", "content": answer})
@@ -420,5 +293,4 @@ class AuraPDFQAApp:
         self.render_chat(top_k, enable_voice)
 
 if __name__ == "__main__":
-    app = AuraPDFQAApp()
-    app.run()
+    AuraPDFQAApp()
