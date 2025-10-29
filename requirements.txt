@@ -8,3 +8,11 @@ pdf2image>=1.16.3
 Pillow>=10.0.0
 gtts>=2.3.2
 groq>=0.3.0
+
+# Voice input / transcription
+SpeechRecognition>=3.10.0
+pydub>=0.25.1
+openai>=0.27.10
+
+# Optional: better audio playback
+soundfile>=0.12.1
