@@ -1,4 +1,6 @@
-# app.py - Aura PDF QA ⚡ (Voice Input + Auto TTS)
+# app.py - Aura PDF QA ⚡
+# Streamlit PDF Q&A app with auto TTS (Voice output), minimal UI messages
+
 import streamlit as st
 import tempfile, os, time, base64, re
 from PyPDF2 import PdfReader
@@ -11,13 +13,13 @@ from gtts import gTTS
 from groq import Groq
 
 # =============================================================================
-# CONFIG
+# CONFIGURATION
 # =============================================================================
 class Config:
-    EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
-    GROQ_MODEL = "llama-3.3-70b-versatile"
-    CHUNK_SIZE = 500
-    MIN_PARAGRAPH_LENGTH = 20
+    EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"  # Embedding model
+    GROQ_MODEL = "llama-3.3-70b-versatile"                        # LLM model
+    CHUNK_SIZE = 500                                              # Max chars per chunk
+    MIN_PARAGRAPH_LENGTH = 20                                     # Ignore tiny paragraphs
 
 # =============================================================================
 # DOCUMENT PROCESSOR
@@ -25,7 +27,7 @@ class Config:
 class DocumentProcessor:
     def __init__(self):
         try:
-            self.embedder = SentenceTransformer(Config.EMBEDDING_MODEL)
+            self.embedder = SentenceTransformer(Config.EMBEDDING_MODEL)  # Load embeddings
             self.index = None
             self.chunks = []
             self.chunk_metadata = []
@@ -33,6 +35,7 @@ class DocumentProcessor:
         except Exception as e:
             st.error(f"❌ Document processor failed: {e}")
 
+    # Extract text directly from text-based PDF
     def extract_text_direct(self, pdf_path):
         reader = PdfReader(pdf_path)
         extracted = []
@@ -42,26 +45,29 @@ class DocumentProcessor:
                 extracted.append({"page": i, "text": text.strip()})
         return extracted
 
+    # Extract text via OCR for scanned PDFs
     def extract_text_ocr(self, pdf_path):
         images = pdf2image.convert_from_path(pdf_path, dpi=200)
         extracted = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         for i, image in enumerate(images):
-            status_text.text(f"📷 OCR page {i+1}/{len(images)}")
+            status_text.text(f"Processing PDF... page {i+1}/{len(images)}")
             text = pytesseract.image_to_string(image)
             if text.strip():
                 extracted.append({"page": i + 1, "text": text.strip()})
             progress_bar.progress((i + 1) / len(images))
-        status_text.text("✅ OCR complete")
+        status_text.text("✅ PDF processed")
         return extracted
 
+    # Determine if PDF is text-based or scanned
     def analyze_pdf_type(self, pdf_path):
         reader = PdfReader(pdf_path)
         text_pages = sum(1 for page in reader.pages if len((page.extract_text() or "").strip()) > 50)
         total_pages = len(reader.pages)
         return "text_based" if total_pages == 0 or text_pages / total_pages > 0.5 else "scanned"
 
+    # Process PDF: extract, chunk, and embed
     def process_pdf(self, uploaded_file):
         self.chunks, self.chunk_metadata, self.index = [], [], None
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -70,10 +76,8 @@ class DocumentProcessor:
         pdf_path = tmp_file.name
 
         try:
-            st.info("🔍 Analyzing PDF type...")
+            st.info("Processing PDF...")  # Short message
             pdf_type = self.analyze_pdf_type(pdf_path)
-            st.info(f"PDF type detected: {pdf_type}")
-
             if pdf_type == "text_based":
                 extracted = self.extract_text_direct(pdf_path)
                 method = "text"
@@ -81,7 +85,7 @@ class DocumentProcessor:
                 extracted = self.extract_text_ocr(pdf_path)
                 method = "ocr"
 
-            # Chunking
+            # Chunk text into manageable sizes
             for item in extracted:
                 page = item["page"]
                 paragraphs = [p.strip() for p in item["text"].split("\n\n") if len(p.strip()) >= Config.MIN_PARAGRAPH_LENGTH]
@@ -105,23 +109,17 @@ class DocumentProcessor:
                             self.chunks.append(para)
                             self.chunk_metadata.append({"page": page, "method": method})
 
-            st.info(f"📊 Created {len(self.chunks)} text chunks")
-
-            if not self.chunks:
-                st.error("❌ No text extracted from PDF.")
-                return 0
-
-            # Embeddings + FAISS
-            st.info("🧠 Creating embeddings...")
+            # Create embeddings
             embeddings = self.embedder.encode(self.chunks)
             self.index = faiss.IndexFlatL2(embeddings.shape[1])
             self.index.add(np.array(embeddings))
-            st.success(f"✅ PDF processed: {len(self.chunks)} chunks created")
+            st.success("✅ PDF processed")  # Minimal success message
             return len(self.chunks)
         finally:
             if os.path.exists(pdf_path):
                 os.unlink(pdf_path)
 
+    # Search for relevant chunks
     def search_similar(self, query, top_k=3):
         if not self.chunks or self.index is None:
             st.warning("⚠️ No document processed yet")
@@ -137,7 +135,7 @@ class DocumentProcessor:
         return results
 
 # =============================================================================
-# GROQ LLM SERVICE
+# LLM SERVICE
 # =============================================================================
 class LLMService:
     def __init__(self):
@@ -148,6 +146,7 @@ class LLMService:
             st.error(f"❌ Groq initialization failed: {e}")
             self.client = None
 
+    # Generate answer from chunks
     def generate_answer(self, question, chunks):
         if not chunks:
             return f"❌ No relevant info found for '{question}'", 0.0
@@ -157,6 +156,7 @@ class LLMService:
         else:
             return self._simple_answer(question, chunks, avg_conf)
 
+    # Use LLM
     def _generate_llm_answer(self, question, chunks, avg_conf):
         try:
             context = "\n\n".join([f"Page {c['metadata']['page']}: {c['content']}" for c in chunks])
@@ -175,6 +175,7 @@ class LLMService:
         except:
             return self._simple_answer(question, chunks, avg_conf)
 
+    # Simple fallback answer
     def _simple_answer(self, question, chunks, avg_conf):
         key_sentences = []
         for chunk in chunks:
@@ -187,6 +188,7 @@ class LLMService:
 # VOICE SERVICE
 # =============================================================================
 class VoiceService:
+    # Clean text to avoid reading weird symbols
     def clean_text_for_tts(self, text):
         text = re.sub(r'[^\w\s.,?-]', '', text)
         replacements = {"%": " percent", "$": " dollars", "°": " degrees", "&": " and "}
@@ -195,6 +197,7 @@ class VoiceService:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
+    # Speak answer automatically
     def speak_text(self, text):
         text = self.clean_text_for_tts(text)
         tts = gTTS(text)
@@ -211,6 +214,7 @@ class VoiceService:
 # =============================================================================
 class AuraPDFQAApp:
     def __init__(self):
+        # Session state
         if 'pdf_processed' not in st.session_state:
             st.session_state.pdf_processed = False
         if 'messages' not in st.session_state:
@@ -221,8 +225,9 @@ class AuraPDFQAApp:
         self.voice_service = VoiceService()
         st.set_page_config(page_title="Aura PDF QA ⚡", layout="wide")
 
+    # Sidebar UI
     def render_sidebar(self):
-        st.sidebar.title("📚 Aura PDF QA")
+        st.sidebar.title("📚 Aura PDF QA")  # Only heading here
         uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
         if st.session_state.pdf_processed:
             st.sidebar.success("✅ PDF ready")
@@ -241,8 +246,9 @@ class AuraPDFQAApp:
         enable_voice = st.sidebar.checkbox("Enable Voice", True)
         return top_k, enable_voice
 
+    # Main chat
     def render_chat(self, top_k, enable_voice):
-        st.title("Aura PDF QA ⚡")
+        st.title("Aura PDF QA ⚡")  # Only one main heading
         if not st.session_state.pdf_processed:
             st.error("❌ Upload PDF and click Process first!")
             return
@@ -253,7 +259,7 @@ class AuraPDFQAApp:
         if question:
             st.session_state.messages.append({"role": "user", "content": question})
             with st.chat_message("assistant"):
-                with st.spinner("🔍 AI analyzing..."):
+                with st.spinner("Processing PDF..."):  # Minimal message
                     chunks = st.session_state.doc_processor.search_similar(question, top_k)
                     answer, conf = self.llm_service.generate_answer(question, chunks)
                     st.markdown(answer)
@@ -261,6 +267,7 @@ class AuraPDFQAApp:
                         self.voice_service.speak_text(answer)
             st.session_state.messages.append({"role": "assistant", "content": answer})
 
+    # Run app
     def run(self):
         top_k, enable_voice = self.render_sidebar()
         self.render_chat(top_k, enable_voice)
