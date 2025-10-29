@@ -5,3 +5,4 @@ faiss-cpu>=1.7.0
 databricks-sdk>=0.15.0
 numpy>=1.21.0
 requests>=2.31.0
+pytesseract
