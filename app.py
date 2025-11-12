@@ -1,25 +1,23 @@
-# app.py - Aura PDF QA ⚡
-# Streamlit PDF Q&A app with auto TTS (Voice output), minimal UI messages
-
-import streamlit as st  # Import Streamlit for web app interface
-import tempfile, os, time, base64, re  # Import utilities for file handling, time, encoding, and regex
-from PyPDF2 import PdfReader  # Import PDF reader for text extraction
-from sentence_transformers import SentenceTransformer  # Import for text embeddings
-import faiss  # Import for similarity search
-import numpy as np  # Import for numerical operations
-import pytesseract  # Import for OCR text extraction
-import pdf2image  # Import for converting PDF to images
-from gtts import gTTS  # Import for text-to-speech
-from groq import Groq  # Import Groq LLM API
+import streamlit as st
+import tempfile, os, time, base64, re
+from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
+import pytesseract
+import pdf2image
+from gtts import gTTS
+from groq import Groq
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 class Config:
-    EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"  # Model for creating text embeddings
-    GROQ_MODEL = "llama-3.3-70b-versatile"  # Groq model for answering questions
-    CHUNK_SIZE = 500  # Maximum size of each text chunk
-    MIN_PARAGRAPH_LENGTH = 20  # Minimum length for paragraphs
+    EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
+    GROQ_MODEL = "llama-3.3-70b-versatile"
+    CHUNK_SIZE = 500
+    MIN_PARAGRAPH_LENGTH = 20
+    TOP_K = 3
 
 # =============================================================================
 # DOCUMENT PROCESSOR
@@ -27,116 +25,96 @@ class Config:
 class DocumentProcessor:
     def __init__(self):
         try:
-            self.embedder = SentenceTransformer(Config.EMBEDDING_MODEL)  # Load embedding model
-            self.index = None  # Initialize search index as None
-            self.chunks = []  # Initialize empty list for text chunks
-            self.chunk_metadata = []  # Initialize empty list for chunk metadata
-            st.success("✅ Document processor ready")  # Show success message
+            self.embedder = SentenceTransformer(Config.EMBEDDING_MODEL)
+            self.index = None
+            self.chunks = []
+            self.chunk_metadata = []
         except Exception as e:
-            st.error(f"❌ Document processor failed: {e}")  # Show error if initialization fails
+            st.error(f"❌ document processor failed: {e}")
 
-    # Extract text directly from text-based PDF
     def extract_text_direct(self, pdf_path):
-        reader = PdfReader(pdf_path)  # Create PDF reader object
-        extracted = []  # Initialize empty list for extracted text
-        for i, page in enumerate(reader.pages, 1):  # Loop through each page starting from 1
-            text = page.extract_text() or ""  # Extract text from page, use empty string if None
-            if text.strip():  # Check if text is not empty
-                extracted.append({"page": i, "text": text.strip()})  # Add page number and text to list
-        return extracted  # Return extracted text
+        reader = PdfReader(pdf_path)
+        extracted = []
+        for i, page in enumerate(reader.pages, 1):
+            text = page.extract_text() or ""
+            if text.strip():
+                extracted.append({"page": i, "text": text.strip()})
+        return extracted
 
-    # Extract text via OCR for scanned PDFs
     def extract_text_ocr(self, pdf_path):
-        images = pdf2image.convert_from_path(pdf_path, dpi=200)  # Convert PDF pages to images
-        extracted = []  # Initialize empty list for OCR results
-        progress_bar = st.progress(0)  # Create progress bar
-        status_text = st.empty()  # Create empty text for status updates
-        for i, image in enumerate(images):  # Loop through each image
-            status_text.text(f"Knowledge at your command page {i+1}/{len(images)}")  # Update status message
-            text = pytesseract.image_to_string(image)  # Extract text from image using OCR
-            if text.strip():  # Check if text was found
-                extracted.append({"page": i + 1, "text": text.strip()})  # Add page number and text to list
-            progress_bar.progress((i + 1) / len(images))  # Update progress bar
-        status_text.text("✅ PDF processed")  # Show completion message
-        return extracted  # Return OCR results
+        images = pdf2image.convert_from_path(pdf_path, dpi=200)
+        extracted = []
+        for i, image in enumerate(images):
+            text = pytesseract.image_to_string(image)
+            if text.strip():
+                extracted.append({"page": i + 1, "text": text.strip()})
+        return extracted
 
-    # Determine if PDF is text-based or scanned
     def analyze_pdf_type(self, pdf_path):
-        reader = PdfReader(pdf_path)  # Create PDF reader
-        # Count pages with substantial text (more than 50 characters)
+        reader = PdfReader(pdf_path)
         text_pages = sum(1 for page in reader.pages if len((page.extract_text() or "").strip()) > 50)
-        total_pages = len(reader.pages)  # Get total number of pages
-        # Return "text_based" if more than 50% of pages have text, otherwise "scanned"
+        total_pages = len(reader.pages)
         return "text_based" if total_pages == 0 or text_pages / total_pages > 0.5 else "scanned"
 
-    # Process PDF: extract, chunk, and embed
     def process_pdf(self, uploaded_file):
-        self.chunks, self.chunk_metadata, self.index = [], [], None  # Reset chunks, metadata, and index
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")  # Create temporary file
-        tmp_file.write(uploaded_file.getvalue())  # Write uploaded content to temp file
-        tmp_file.close()  # Close the file
-        pdf_path = tmp_file.name  # Get path to temporary file
+        self.chunks, self.chunk_metadata, self.index = [], [], None
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp_file.write(uploaded_file.getvalue())
+        tmp_file.close()
+        pdf_path = tmp_file.name
 
         try:
-            st.info("Knowledge at your command!")  # Show processing message
-            pdf_type = self.analyze_pdf_type(pdf_path)  # Determine PDF type
-            if pdf_type == "text_based":  # If PDF is text-based
-                extracted = self.extract_text_direct(pdf_path)  # Use direct text extraction
-                method = "text"  # Set method to text
-            else:  # If PDF is scanned
-                extracted = self.extract_text_ocr(pdf_path)  # Use OCR extraction
-                method = "ocr"  # Set method to OCR
+            pdf_type = self.analyze_pdf_type(pdf_path)
+            if pdf_type == "text_based":
+                extracted = self.extract_text_direct(pdf_path)
+                method = "text"
+            else:
+                extracted = self.extract_text_ocr(pdf_path)
+                method = "ocr"
 
-            # Chunk text into manageable sizes
-            for item in extracted:  # Process each extracted page
-                page = item["page"]  # Get page number
-                # Split text into paragraphs (separated by double newlines)
+            for item in extracted:
+                page = item["page"]
                 paragraphs = [p.strip() for p in item["text"].split("\n\n") if len(p.strip()) >= Config.MIN_PARAGRAPH_LENGTH]
-                for para in paragraphs:  # Process each paragraph
-                    if len(para) > Config.CHUNK_SIZE:  # If paragraph is too long
-                        sentences = para.split(". ")  # Split into sentences
-                        chunk = ""  # Initialize current chunk
-                        for s in sentences:  # Process each sentence
-                            if len(chunk + s) < Config.CHUNK_SIZE:  # If chunk not full
-                                chunk += s + ". "  # Add sentence to chunk
-                            else:  # If chunk is full
-                                if chunk.strip():  # If chunk has content
-                                    self.chunks.append(chunk.strip())  # Save current chunk
-                                    self.chunk_metadata.append({"page": page, "method": method})  # Save metadata
-                                chunk = s + ". "  # Start new chunk with current sentence
-                        if chunk.strip():  # If there's remaining text
-                            self.chunks.append(chunk.strip())  # Save last chunk
-                            self.chunk_metadata.append({"page": page, "method": method})  # Save metadata
-                    else:  # If paragraph fits in one chunk
-                        if para.strip():  # If paragraph has content
-                            self.chunks.append(para)  # Save paragraph as chunk
-                            self.chunk_metadata.append({"page": page, "method": method})  # Save metadata
+                for para in paragraphs:
+                    if len(para) > Config.CHUNK_SIZE:
+                        sentences = para.split(". ")
+                        chunk = ""
+                        for s in sentences:
+                            if len(chunk + s) < Config.CHUNK_SIZE:
+                                chunk += s + ". "
+                            else:
+                                if chunk.strip():
+                                    self.chunks.append(chunk.strip())
+                                    self.chunk_metadata.append({"page": page, "method": method})
+                                chunk = s + ". "
+                        if chunk.strip():
+                            self.chunks.append(chunk.strip())
+                            self.chunk_metadata.append({"page": page, "method": method})
+                    else:
+                        if para.strip():
+                            self.chunks.append(para)
+                            self.chunk_metadata.append({"page": page, "method": method})
 
-            # Create embeddings
-            embeddings = self.embedder.encode(self.chunks)  # Convert text chunks to vectors
-            self.index = faiss.IndexFlatL2(embeddings.shape[1])  # Create FAISS search index
-            self.index.add(np.array(embeddings))  # Add embeddings to the index
-            st.success("✅ PDF processed")  # Show success message
-            return len(self.chunks)  # Return number of chunks created
+            embeddings = self.embedder.encode(self.chunks)
+            self.index = faiss.IndexFlatL2(embeddings.shape[1])
+            self.index.add(np.array(embeddings))
+            return len(self.chunks)
         finally:
-            if os.path.exists(pdf_path):  # Check if temp file exists
-                os.unlink(pdf_path)  # Delete temporary file
+            if os.path.exists(pdf_path):
+                os.unlink(pdf_path)
 
-    # Search for relevant chunks
-    def search_similar(self, query, top_k=3):
-        if not self.chunks or self.index is None:  # If no data has been processed
-            st.warning("⚠️ No document processed yet")  # Show warning
-            return []  # Return empty list
-        query_vec = self.embedder.encode([query])  # Convert query to vector
-        distances, indices = self.index.search(np.array(query_vec), top_k)  # Search for similar chunks
-        results = []  # Initialize empty list for results
-        for i, idx in enumerate(indices[0]):  # Process each result
-            if idx < len(self.chunks):  # If index is valid
-                sim = 1 / (1 + distances[0][i])  # Calculate similarity score
-                # Add result to list with content, metadata, and similarity
+    def search_similar(self, query, top_k=Config.TOP_K):
+        if not self.chunks or self.index is None:
+            return []
+        query_vec = self.embedder.encode([query])
+        distances, indices = self.index.search(np.array(query_vec), top_k)
+        results = []
+        for i, idx in enumerate(indices[0]):
+            if idx < len(self.chunks):
+                sim = 1 / (1 + distances[0][i])
                 results.append({"content": self.chunks[idx], "metadata": self.chunk_metadata[idx], "similarity": round(sim, 3)})
-        results.sort(key=lambda x: x["similarity"], reverse=True)  # Sort by similarity (highest first)
-        return results  # Return sorted results
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results
 
 # =============================================================================
 # LLM SERVICE
@@ -144,149 +122,378 @@ class DocumentProcessor:
 class LLMService:
     def __init__(self):
         try:
-            self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])  # Initialize Groq client with API key
-            st.sidebar.success("✅ Groq LLM connected")  # Show success message in sidebar
+            self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
         except Exception as e:
-            st.error(f"❌ Groq initialization failed: {e}")  # Show error if initialization fails
-            self.client = None  # Set client to None
+            st.error(f"❌ groq initialization failed: {e}")
+            self.client = None
 
-    # Generate answer from chunks
     def generate_answer(self, question, chunks):
-        if not chunks:  # If no relevant chunks found
-            return f"❌ No relevant info found for '{question}'", 0.0  # Return error message
-        avg_conf = sum(c["similarity"] for c in chunks)/len(chunks)  # Calculate average confidence
-        if self.client:  # If Groq client is available
-            return self._generate_llm_answer(question, chunks, avg_conf)  # Use LLM for answer
-        else:  # If Groq client is not available
-            return self._simple_answer(question, chunks, avg_conf)  # Use simple answer
+        if not chunks:
+            return f"❌ no relevant info found for '{question}'", 0.0, []
+        avg_conf = sum(c["similarity"] for c in chunks)/len(chunks)
+        if self.client:
+            return self._generate_llm_answer(question, chunks, avg_conf)
+        else:
+            return self._simple_answer(question, chunks, avg_conf)
 
-    # Use LLM
     def _generate_llm_answer(self, question, chunks, avg_conf):
         try:
-            context = "\n\n".join([f"Page {c['metadata']['page']}: {c['content']}" for c in chunks])  # Prepare context from chunks
+            context = "\n\n".join([f"page {c['metadata']['page']}: {c['content']}" for c in chunks])
             messages = [
-                {"role": "system", "content": "You are an expert document analyst. Only use the provided context."},  # System prompt
-                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}  # User question with context
+                {"role": "system", "content": "you are an expert document analyst. only use the provided context. always mention the page numbers where you found the information."},
+                {"role": "user", "content": f"context:\n{context}\n\nquestion: {question}"}
             ]
-            response = self.client.chat.completions.create(  # Send request to Groq API
-                model=Config.GROQ_MODEL,  # Use configured model
-                messages=messages,  # Pass messages
-                temperature=0.1,  # Low temperature for consistent responses
-                max_tokens=1024  # Maximum tokens in response
+            response = self.client.chat.completions.create(
+                model=Config.GROQ_MODEL,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=1024
             )
-            ai_answer = response.choices[0].message.content  # Extract AI response
-            return ai_answer, avg_conf  # Return answer and confidence
-        except:  # If LLM fails
-            return self._simple_answer(question, chunks, avg_conf)  # Fall back to simple answer
+            ai_answer = response.choices[0].message.content
+            return ai_answer, avg_conf, chunks
+        except:
+            return self._simple_answer(question, chunks, avg_conf)
 
-    # Simple fallback answer
     def _simple_answer(self, question, chunks, avg_conf):
-        key_sentences = []  # Initialize empty list for key sentences
-        for chunk in chunks:  # Process each chunk
-            sentences = [s.strip() for s in chunk['content'].split('.') if s.strip()]  # Split chunk into sentences
-            key_sentences.extend(sentences[:2])  # Add first 2 sentences to key sentences
-        summary = ' '.join(key_sentences[:6])  # Join first 6 sentences into summary
-        return summary, avg_conf  # Return summary and confidence
+        key_sentences = []
+        for chunk in chunks:
+            sentences = [s.strip() for s in chunk['content'].split('.') if s.strip()]
+            key_sentences.extend(sentences[:2])
+        summary = ' '.join(key_sentences[:6])
+        return summary, avg_conf, chunks
+
+    def generate_suggested_questions(self, document_content_sample):
+        """Generate relevant questions based on document content"""
+        try:
+            messages = [
+                {"role": "system", "content": "you are an expert at analyzing documents and generating relevant questions. generate 5-6 specific questions that would help someone understand the key points of this document."},
+                {"role": "user", "content": f"based on this document content, suggest relevant questions:\n\n{document_content_sample}\n\nprovide 5-6 specific questions as a python list format."}
+            ]
+            response = self.client.chat.completions.create(
+                model=Config.GROQ_MODEL,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=500
+            )
+            questions_text = response.choices[0].message.content
+            # Extract questions from the response
+            questions = []
+            for line in questions_text.split('\n'):
+                line = line.strip()
+                if line and (line.startswith('-') or line.startswith('•') or line[0].isdigit()):
+                    question = re.sub(r'^[-\d•\.\s]+', '', line).strip()
+                    if question and len(question) > 10:
+                        questions.append(question)
+            return questions[:6] if questions else self._get_fallback_questions()
+        except:
+            return self._get_fallback_questions()
+
+    def _get_fallback_questions(self):
+        """Fallback questions if LLM fails"""
+        return [
+            "what is the main purpose of this document?",
+            "what are the key findings or conclusions?",
+            "who is the intended audience for this content?",
+            "what methodology or approach was used?",
+            "what are the main recommendations?",
+            "what problems or challenges does this address?"
+        ]
 
 # =============================================================================
 # VOICE SERVICE
 # =============================================================================
 class VoiceService:
-    # Clean text to avoid reading weird symbols
     def clean_text_for_tts(self, text):
-        text = re.sub(r'[^\w\s.,?-]', '', text)  # Remove special characters except basic punctuation
-        replacements = {"%": " percent", "$": " dollars", "°": " degrees", "&": " and "}  # Define symbol replacements
-        for k, v in replacements.items():  # Loop through replacements
-            text = text.replace(k, v)  # Replace symbols with words
-        text = re.sub(r'\s+', ' ', text).strip()  # Remove extra whitespace
-        return text  # Return cleaned text
+        text = re.sub(r'[^\w\s.,?-]', '', text)
+        replacements = {"%": " percent", "$": " dollars", "°": " degrees", "&": " and "}
+        for k, v in replacements.items():
+            text = text.replace(k, v)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
 
-    # Speak answer automatically
     def speak_text(self, text):
-        text = self.clean_text_for_tts(text)  # Clean text for TTS
-        tts = gTTS(text)  # Create text-to-speech object
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")  # Create temporary audio file
-        tts.save(tmp_file.name)  # Save speech to file
-        with open(tmp_file.name, "rb") as f:  # Open audio file in binary mode
-            audio_bytes = f.read()  # Read audio bytes
-        audio_base64 = base64.b64encode(audio_bytes).decode()  # Encode audio to base64
-        html = f"""<audio autoplay><source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3"></audio>"""  # Create HTML audio element
-        st.components.v1.html(html, height=50)  # Display auto-playing audio
+        text = self.clean_text_for_tts(text)
+        tts = gTTS(text)
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tts.save(tmp_file.name)
+        with open(tmp_file.name, "rb") as f:
+            audio_bytes = f.read()
+        audio_base64 = base64.b64encode(audio_bytes).decode()
+        html = f"""<audio autoplay><source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3"></audio>"""
+        st.components.v1.html(html, height=50)
 
 # =============================================================================
-# STREAMLIT APP
+# MAIN RAG CHAT APP
 # =============================================================================
-class AuraPDFQAApp:
-    def __init__(self):
-        # Session state initialization
-        if 'pdf_processed' not in st.session_state:  # Check if PDF processed flag exists
-            st.session_state.pdf_processed = False  # Initialize as not processed
-        if 'messages' not in st.session_state:  # Check if messages exist
-            st.session_state.messages = []  # Initialize empty message list
-        if 'doc_processor' not in st.session_state:  # Check if document processor exists
-            st.session_state.doc_processor = DocumentProcessor()  # Initialize document processor
-        self.llm_service = LLMService()  # Initialize LLM service
-        self.voice_service = VoiceService()  # Initialize voice service
-        st.set_page_config(page_title="📚 IRMC Aura", layout="wide")  # Configure Streamlit page
-
-    # Sidebar UI
-    def render_sidebar(self):
-        st.sidebar.title("Fast & reliable ⚡")  # Sidebar title
-        uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")  # PDF uploader
-        if st.session_state.pdf_processed:  # If PDF is processed
-            st.sidebar.success("✅ PDF ready")  # Show ready message
-        else:  # If PDF is not processed
-            st.sidebar.warning("⚠️ Upload PDF first")  # Show warning
-        if uploaded_file:  # If file is uploaded
-            st.sidebar.write(f"**File:** {uploaded_file.name}")  # Show file name
-            if st.sidebar.button("🚀 Process Document"):  # Process button
-                with st.spinner("Processing....."):  # Show spinner
-                    count = st.session_state.doc_processor.process_pdf(uploaded_file)  # Process PDF
-                    if count > 0:  # If processing successful
-                        st.session_state.pdf_processed = True  # Set processed flag
-                        st.session_state.pdf_name = uploaded_file.name  # Store PDF name
-                        st.sidebar.success(f"✅ PDF processed ({count} chunks)")  # Show success
-        top_k = st.sidebar.slider("Sources to retrieve", 1, 5, 3)  # Slider for number of sources
-        enable_voice = st.sidebar.checkbox("Enable Voice", True)  # Checkbox for voice feature
-        return top_k, enable_voice  # Return settings
-
-    # Main chat
-    def render_chat(self, top_k, enable_voice):
-        # Center the title using HTML/CSS
+def main():
+    # page configuration for rag chat
+    st.set_page_config(
+        page_title="doc rag chat - irmc aura",
+        page_icon="📄",
+        layout="wide"
+    )
+    
+    # custom css for better chat display and floating button
+    st.markdown("""
+    <style>
+        .chat-message {
+            padding: 1rem;
+            border-radius: 10px;
+            margin-bottom: 1rem;
+        }
+        .user-message {
+            background-color: #e6f3ff;
+            border-left: 4px solid #175CFF;
+        }
+        .assistant-message {
+            background-color: #f0f8ff;
+            border-left: 4px solid #00A3FF;
+        }
+        .confidence-badge {
+            background-color: #e8f5e8;
+            color: #2e7d32;
+            padding: 0.2rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            margin-left: 0.5rem;
+        }
+        .page-badge {
+            background-color: #fff3e0;
+            color: #ef6c00;
+            padding: 0.2rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            margin-left: 0.5rem;
+        }
+        .floating-suggest-btn {
+            position: fixed;
+            bottom: 100px;
+            right: 20px;
+            z-index: 1000;
+            background: linear-gradient(135deg, #175CFF, #00A3FF);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            padding: 12px 20px;
+            font-weight: 600;
+            box-shadow: 0 4px 12px rgba(23, 92, 255, 0.3);
+            cursor: pointer;
+        }
+        .floating-suggest-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(23, 92, 255, 0.4);
+        }
+        .question-chip {
+            background-color: #e3f2fd;
+            color: #1565c0;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            margin: 0.2rem;
+            cursor: pointer;
+            border: 1px solid #90caf9;
+            display: inline-block;
+        }
+        .question-chip:hover {
+            background-color: #bbdefb;
+            transform: translateY(-1px);
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # add back to home button
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.title("📄 doc rag chat")
+        st.markdown("### chat with your documents using ai")
+    with col2:
+        if st.button("🏠 back to home"):
+            st.switch_page("app.py")
+    
+    st.markdown("---")
+    
+    # initialize session state for rag app
+    if 'pdf_processed' not in st.session_state:
+        st.session_state.pdf_processed = False
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    if 'doc_processor' not in st.session_state:
+        st.session_state.doc_processor = DocumentProcessor()
+    if 'suggested_questions' not in st.session_state:
+        st.session_state.suggested_questions = []
+    if 'show_suggestions' not in st.session_state:
+        st.session_state.show_suggestions = False
+    
+    # initialize services
+    llm_service = LLMService()
+    voice_service = VoiceService()
+    
+    # sidebar - simplified
+    st.sidebar.title("📁 document controls")
+    uploaded_file = st.sidebar.file_uploader("upload pdf", type="pdf", key="pdf_uploader")
+    
+    # auto-process when file is uploaded
+    if uploaded_file and not st.session_state.pdf_processed:
+        with st.spinner(""):
+            count = st.session_state.doc_processor.process_pdf(uploaded_file)
+            if count > 0:
+                st.session_state.pdf_processed = True
+                st.session_state.pdf_name = uploaded_file.name
+                
+                # generate suggested questions based on document content
+                sample_content = " ".join([chunk["content"] for chunk in st.session_state.doc_processor.chunks[:5]])
+                st.session_state.suggested_questions = llm_service.generate_suggested_questions(sample_content)
+    
+    if st.session_state.pdf_processed:
+        st.sidebar.success("✅ document ready")
+    
+    enable_voice = st.sidebar.checkbox("enable voice output", True)
+    
+    # main chat interface
+    if not st.session_state.pdf_processed:
+        st.info("👆 please upload a pdf document to get started")
+        return
+    
+    # display chat messages with both questions and answers
+    for msg in st.session_state.messages:
+        if msg["role"] == "user":
+            st.markdown(f"""
+            <div class="chat-message user-message">
+                <strong>you:</strong> {msg["content"]}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            confidence = msg.get("confidence", 0)
+            pages = msg.get("pages", [])
+            
+            confidence_html = f'<span class="confidence-badge">confidence: {confidence*100:.1f}%</span>' if confidence > 0 else ""
+            pages_html = f'<span class="page-badge">pages: {", ".join(map(str, pages))}</span>' if pages else ""
+            
+            st.markdown(f"""
+            <div class="chat-message assistant-message">
+                <strong>aura:</strong> {msg["content"]} {confidence_html} {pages_html}
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # show suggested questions if button was clicked
+    if st.session_state.show_suggestions and st.session_state.suggested_questions:
+        st.markdown("---")
+        st.subheader("💡 suggested questions")
+        st.write("click on any question to ask it:")
+        
+        # display questions as clickable chips
+        cols = st.columns(2)
+        for i, question in enumerate(st.session_state.suggested_questions):
+            with cols[i % 2]:
+                if st.button(question, key=f"suggested_{i}", use_container_width=True):
+                    # set the question in session state to be processed
+                    st.session_state.selected_question = question
+                    st.session_state.show_suggestions = False
+                    st.rerun()
+    
+    # floating suggest button
+    if st.session_state.pdf_processed:
         st.markdown("""
-            <style>
-            .centered-title {
-                text-align: center;
-            }
-            </style>
-            <h1 class="centered-title">IRMC Aura 📚</h1>
-        """, unsafe_allow_html=True)  # Apply centered title styling
+        <div style="position: fixed; bottom: 100px; right: 20px; z-index: 1000;">
+            <button onclick="window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'suggest_clicked'}, '*')" 
+                    style="background: linear-gradient(135deg, #175CFF, #00A3FF); color: white; border: none; border-radius: 25px; padding: 12px 20px; font-weight: 600; box-shadow: 0 4px 12px rgba(23, 92, 255, 0.3); cursor: pointer;">
+                💡 let aura suggest questions
+            </button>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # handle floating button click
+    if st.button("💡 let aura suggest questions", key="floating_btn"):
+        st.session_state.show_suggestions = True
+        st.rerun()
+    
+    # handle selected question from suggestions
+    if 'selected_question' in st.session_state:
+        question = st.session_state.selected_question
+        del st.session_state.selected_question
         
-        if not st.session_state.pdf_processed:  # If no PDF processed
-            st.error("❌ Upload PDF and click Process first!")  # Show error
-            return  # Exit function
+        # add user question to chat history
+        st.session_state.messages.append({"role": "user", "content": question})
         
-        for msg in st.session_state.messages:  # Display all previous messages
-            with st.chat_message(msg["role"]):  # Create chat bubble
-                st.markdown(msg["content"])  # Display message content
+        # display user question immediately
+        st.markdown(f"""
+        <div class="chat-message user-message">
+            <strong>you:</strong> {question}
+        </div>
+        """, unsafe_allow_html=True)
         
-        question = st.chat_input("Ask a question about your document...")  # Chat input widget
-        if question:  # If user entered a question
-            st.session_state.messages.append({"role": "user", "content": question})  # Add user message to history
-            with st.chat_message("assistant"):  # Assistant response bubble
-                with st.spinner("Just a sec........."):  # Show loading spinner
-                    chunks = st.session_state.doc_processor.search_similar(question, top_k)  # Search for relevant chunks
-                    answer, conf = self.llm_service.generate_answer(question, chunks)  # Generate answer
-                    st.markdown(answer)  # Display the answer
-                    if enable_voice:  # If voice is enabled
-                        self.voice_service.speak_text(answer)  # Speak the answer
-            st.session_state.messages.append({"role": "assistant", "content": answer})  # Add assistant answer to history
-
-    # Run app
-    def run(self):
-        top_k, enable_voice = self.render_sidebar()  # Render sidebar and get settings
-        self.render_chat(top_k, enable_voice)  # Render main chat interface
+        # generate and display answer
+        with st.spinner("🔍 searching document..."):
+            chunks = st.session_state.doc_processor.search_similar(question)
+            answer, confidence, source_chunks = llm_service.generate_answer(question, chunks)
+            
+            # extract page numbers from source chunks
+            source_pages = list(set([chunk["metadata"]["page"] for chunk in source_chunks]))
+            source_pages.sort()
+            
+            # add assistant answer to chat history with metadata
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": answer,
+                "confidence": confidence,
+                "pages": source_pages
+            })
+            
+            # display assistant answer with confidence and pages
+            confidence_html = f'<span class="confidence-badge">confidence: {confidence*100:.1f}%</span>'
+            pages_html = f'<span class="page-badge">pages: {", ".join(map(str, source_pages))}</span>'
+            
+            st.markdown(f"""
+            <div class="chat-message assistant-message">
+                <strong>aura:</strong> {answer} {confidence_html} {pages_html}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if enable_voice:
+                voice_service.speak_text(answer)
+    
+    # regular chat input
+    question = st.chat_input("ask a question about your document...")
+    
+    if question:
+        # add user question to chat history
+        st.session_state.messages.append({"role": "user", "content": question})
+        
+        # display user question immediately
+        st.markdown(f"""
+        <div class="chat-message user-message">
+            <strong>you:</strong> {question}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # generate and display answer
+        with st.spinner("🔍 searching document..."):
+            chunks = st.session_state.doc_processor.search_similar(question)
+            answer, confidence, source_chunks = llm_service.generate_answer(question, chunks)
+            
+            # extract page numbers from source chunks
+            source_pages = list(set([chunk["metadata"]["page"] for chunk in source_chunks]))
+            source_pages.sort()
+            
+            # add assistant answer to chat history with metadata
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": answer,
+                "confidence": confidence,
+                "pages": source_pages
+            })
+            
+            # display assistant answer with confidence and pages
+            confidence_html = f'<span class="confidence-badge">confidence: {confidence*100:.1f}%</span>'
+            pages_html = f'<span class="page-badge">pages: {", ".join(map(str, source_pages))}</span>'
+            
+            st.markdown(f"""
+            <div class="chat-message assistant-message">
+                <strong>aura:</strong> {answer} {confidence_html} {pages_html}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if enable_voice:
+                voice_service.speak_text(answer)
 
 if __name__ == "__main__":
-    app = AuraPDFQAApp()  # Create app instance
-    app.run()  # Run the app
+    main()
